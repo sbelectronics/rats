@@ -1,0 +1,64 @@
+$MEDIUM OPTIMIZE(1)
+Sleep: DO;
+/* Sleep(n): wait about 1/n of a calibrated interval, keeping a tenths-of-
+   ticks clock.  On first call allocates an exchange and opens a CTOS
+   real-time clock request (counter=1, reload=1 -> one event per RT tick).
+   Then it busy-polls the exchange with the kernel Check primitive,
+   counting idle polls (cIdle).  When an RT clock event has arrived:
+   cPollsPerTick is re-estimated as (3*old + cIdle + 2)/4, the elapsed
+   events are added to bTenths, and every 10 events tickCount is bumped.
+   If no event arrives within cPollsPerTick/n polls, it returns anyway. */
+
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+AllocExch: PROCEDURE (pExchRet) WORD EXTERNAL; DECLARE pExchRet POINTER; END;
+OpenRTClock: PROCEDURE (pRqTime) WORD EXTERNAL; DECLARE pRqTime POINTER; END;
+Check: PROCEDURE (exch, ppMsgRet) WORD EXTERNAL;
+   DECLARE exch WORD, ppMsgRet POINTER; END;
+
+DECLARE exchRtc WORD,                    /* 2C9A */
+   rtc STRUCTURE (counter WORD, counterReload WORD, cEvents WORD,
+      exchResp WORD, ercRet WORD, rqCode WORD),   /* 2C9C */
+   cPollsPerTick WORD INITIAL (100),     /* 2CA8 */
+   cIdle WORD,                           /* 2CAA */
+   tickCount WORD PUBLIC,                /* 2CAC */
+   bTenths BYTE,                         /* 2CAE */
+   fFirst BYTE INITIAL (0FFH);           /* 2CAF */
+
+Sleep: PROCEDURE (n) PUBLIC REENTRANT;
+   DECLARE n BYTE;
+   DECLARE cMax WORD;
+   DECLARE i WORD;
+   DECLARE pMsg POINTER;
+   IF fFirst THEN
+   DO;
+      CALL CheckErc(AllocExch(@exchRtc));
+      rtc.counter = 1;
+      rtc.counterReload = 1;
+      rtc.cEvents = 0;
+      rtc.exchResp = exchRtc;
+      rtc.ercRet = 0;
+      rtc.rqCode = 0FFFFH;
+      CALL CheckErc(OpenRTClock(@rtc));
+      fFirst = 0;
+   END;
+   cMax = cPollsPerTick / n;
+   i = 0;
+   DO WHILE i <= cMax;
+      IF Check(exchRtc, @pMsg) = 0 THEN
+         IF rtc.cEvents <> 0 THEN
+         DO;
+            cPollsPerTick = SHR(SHL(cPollsPerTick, 1) + cPollsPerTick + cIdle + 2, 2);
+            cIdle = 0;
+            bTenths = bTenths + rtc.cEvents;
+            DO WHILE bTenths >= 10;
+               tickCount = tickCount + 1;
+               bTenths = bTenths - 10;
+            END;
+            rtc.cEvents = 0;
+            RETURN;
+         END;
+      cIdle = cIdle + 1;
+      i = i + 1;
+   END;
+END Sleep;
+END Sleep;

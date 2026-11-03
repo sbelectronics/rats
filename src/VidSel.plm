@@ -1,0 +1,32 @@
+$MEDIUM OPTIMIZE(2)
+/* VidSel: select the video driver (image 6BB4-6C0E).
+   GetVidType BYTE   driver index (0 or 1) for this workstation, derived
+                     from the byte at GetPStructure(2); erc 500 if the
+                     hardware is not supported.  Cached in bVidType.
+   CONST = DGROUP 10E0-10E4, DATA = DGROUP 2F10.                       */
+VidSel: DO;
+
+/* ---- CONST (DGROUP 10E0..) ---- */
+DECLARE rgbVidType (5) BYTE DATA (0, 0, 0FFH, 0FFH, 1);     /* 10E0 */
+
+/* ---- DATA (DGROUP 2F10) ---- */
+DECLARE bVidType BYTE INITIAL (0FFH);                       /* 2F10 */
+
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+GetPStructure: PROCEDURE (structCode, ph, ppStructRet) WORD EXTERNAL;
+   DECLARE (structCode, ph) WORD, ppStructRet POINTER; END;
+
+GetVidType: PROCEDURE BYTE PUBLIC REENTRANT;
+   DECLARE p POINTER, b BASED p BYTE;
+   IF bVidType = 0FFH THEN DO;
+      CALL CheckErc(GetPStructure(2, 0, @p));
+      IF b >= 5 THEN
+         CALL CheckErc(500);
+      bVidType = rgbVidType(b);
+      IF bVidType = 0FFH THEN
+         CALL CheckErc(500);
+   END;
+   RETURN bVidType;
+END GetVidType;
+
+END VidSel;

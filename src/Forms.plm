@@ -1,0 +1,981 @@
+$MEDIUM OPTIMIZE(2)
+/* Forms: small full-screen forms (dialog) runtime (image 3D1C-5286, frame 3D1).
+   A form descriptor (FormType, e.g. the options form at DGROUP 0680) holds a
+   header, cbText bytes of static text lines and cbFields bytes of field
+   descriptors.  Text line: attr, cb, cb chars (attr 0FFh: cb blanks, no
+   chars; cb 0: new line).  Field (FieldType): format proc, parse proc
+   (both far, see FormFields), offset of the value in the caller's record,
+   col/row/width relative to the form, editable, has-default, kind (0 text,
+   1 choice), align (text) / default value (choice), then the default
+   string (text) or nChoices + 5-byte ChoiceType entries (choice).
+   An open form is described by a 16-byte StateType (form, frame, origin,
+   saved screen buffer).
+   Public:
+     DoFormEx(pForm, frame, col, row, pValidate, pRec, pInit)
+                   open, show pInit, edit until GO and pValidate(.state,.rec)
+                   returns 0 (else show its error and edit again), close
+     DoForm(pRec, pForm, frame, col, row, pInit) BYTE
+                   open, show pInit, edit once; TRUE if GO, FALSE if CANCEL
+     FormOpenShow(pState, pForm, frame, col, row, pRec)  open + show values
+     FormOpen(pState, pForm, frame, col, row)  centre (0FFh), save screen
+                   under the form, draw the static text
+     FormShowValues(pState, pRec)  format every field from the record
+     FormEdit(pRec, pState) BYTE  edit + parse all fields (until no error)
+     FormShowErc(pState, erc, attr)  error message in the message line
+     FormShowMsg(pState, psb, attr)  message line
+     FormClose(pState)   restore the screen, free the buffer
+     FormParseAll(pRec, pState, ppFldRet) WORD  parse all fields into pRec
+     FormEditLoop(pState, pFld, erc) BYTE  keyboard loop
+     FieldAt / NextField / SbInsertCh / SbDeleteLeft / SbDeleteWord /
+     SbDeleteCh / FieldShow / FieldParse / FieldHome / FieldHighlight /
+     FieldSize / FieldReadScreen / FieldDrawText / DrawAligned /
+     ChoiceGetValue / ChoiceSelect / ChoiceShow / GetErcText
+   CONST (DGROUP 0AFE-0C7A): rgbKeyClass (keyboard code -> edit action:
+   1-4 cursor, 5 character, 6 backspace, 7 delete word, 8 delete, 9
+   overtype toggle (LED 7), 10 next field, 11 GO, 12 CANCEL, 13/14 field
+   start/end, 15/16 top/bottom), then the messages for ercs 31000-31005.
+   Notes: local 256-byte string buffers are STRUCTUREs (SbType): a BYTE
+   array would be allocated after all word-sized locals.  The attribute
+   bit tests use a BYTE overlay of the VidGetCell result.               */
+Forms: DO;
+
+DECLARE TRUE LITERALLY '0FFH', FALSE LITERALLY '0', FOREVER LITERALLY 'WHILE 1';
+
+DECLARE FormType LITERALLY 'STRUCTURE (cols BYTE, rows BYTE, msgCol BYTE,
+        msgRow BYTE, msgWidth BYTE, msgAttr BYTE, msgAlign BYTE, b7 BYTE,
+        cbText WORD, cbFields WORD, rgb (1) BYTE)';
+DECLARE StateType LITERALLY 'STRUCTURE (pForm WORD, frame WORD, col WORD,
+        row WORD, absCol WORD, absRow WORD, pBuf POINTER)';
+DECLARE FieldType LITERALLY 'STRUCTURE (pFmt POINTER, pParse POINTER,
+        off WORD, col BYTE, row BYTE, width BYTE, fEdit BYTE, fDefault BYTE,
+        kind BYTE, align BYTE, cb BYTE, rgb (1) BYTE)';
+DECLARE ChoiceType LITERALLY 'STRUCTURE (col BYTE, width BYTE, cbGap BYTE,
+        key BYTE, value BYTE)';
+DECLARE SbType LITERALLY 'STRUCTURE (cb BYTE, rgb (255) BYTE)';
+DECLARE LineType LITERALLY 'STRUCTURE (attr BYTE, cb BYTE, rgb (1) BYTE)';
+DECLARE FrameType LITERALLY 'STRUCTURE (row0 BYTE, col0 BYTE, rows BYTE,
+        cols BYTE, b4 (6) BYTE, curRow BYTE, curCol BYTE)';
+
+/* ---- CONST (DGROUP 0AFE..) ---- */
+DECLARE rgbKeyClass (256) BYTE DATA (
+   0, 3, 0, 5, 0, 0, 5, 12, 6, 5, 10, 4, 0, 0, 1, 0,
+   5, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 11, 0, 0, 0, 0,
+   5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+   5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+   5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+   5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+   5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+   5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 8,
+   0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 13, 5,
+   0, 0, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+   0, 0, 5, 5, 5, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+   9, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0,
+   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+   0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0, 0, 0, 0),
+   sbErc31000 (*) BYTE DATA (20, 'Please enter a value'),
+   sbErc31001 (*) BYTE DATA (21, 'Please choose a value'),
+   sbErc31002 (*) BYTE DATA (30, 'Please choose either Yes or No'),
+   sbErc31003 (*) BYTE DATA (14, 'Invalid number'),
+   sbErc31004 (*) BYTE DATA (19, 'Number out of range'),
+   sbErc31005 (*) BYTE DATA (15, 'String too long');
+
+/* ---- externals ---- */
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+MemAlloc: PROCEDURE (ppRet, cb) WORD EXTERNAL; DECLARE ppRet POINTER, cb WORD; END;
+MemFree: PROCEDURE (p) EXTERNAL; DECLARE p POINTER; END;
+/* asm thunk: calls pProc(a, b), returns its WORD result */
+CallProc: PROCEDURE (a, b, pProc) WORD EXTERNAL;
+   DECLARE (a, b) WORD, pProc POINTER; END;
+FLedOn: PROCEDURE (iLed) BYTE EXTERNAL; DECLARE iLed BYTE; END;
+SetLed: PROCEDURE (iLed, fOn) EXTERNAL; DECLARE (iLed, fOn) BYTE; END;
+GetErcMsg: PROCEDURE (psbRet, erc) EXTERNAL; DECLARE psbRet POINTER, erc WORD; END;
+CopySb: PROCEDURE (pDst, pSrc) EXTERNAL; DECLARE (pDst, pSrc) POINTER; END;
+VidReadChars: PROCEDURE (pb, col, row, cnt) EXTERNAL;
+   DECLARE pb POINTER, (col, row, cnt) WORD; END;
+VidReadCells: PROCEDURE (pb, col, row, cnt) EXTERNAL;
+   DECLARE pb POINTER, (col, row, cnt) WORD; END;
+VidGetCell: PROCEDURE (col, row) WORD EXTERNAL; DECLARE (col, row) WORD; END;
+VidFillAttr: PROCEDURE (col, row, cnt, attr) EXTERNAL;
+   DECLARE (col, row, cnt) WORD, attr BYTE; END;
+VidFillCells: PROCEDURE (col, row, cnt, chAttr) EXTERNAL;
+   DECLARE (col, row, cnt, chAttr) WORD; END;
+VidPutChars: PROCEDURE (col, row, cnt, pb, attr) EXTERNAL;
+   DECLARE (col, row, cnt) WORD, pb POINTER, attr BYTE; END;
+VidPutCells: PROCEDURE (col, row, cnt, pb) EXTERNAL;
+   DECLARE (col, row, cnt) WORD, pb POINTER; END;
+/* ---- CTOS ---- */
+LockVideo: PROCEDURE EXTERNAL; END;
+UnLockVideo: PROCEDURE EXTERNAL; END;
+PosFrameCursor: PROCEDURE (iFrame, iCol, iLine) WORD EXTERNAL;
+   DECLARE (iFrame, iCol, iLine) WORD; END;
+Beep: PROCEDURE EXTERNAL; END;
+ReadKbd: PROCEDURE (pCharRet) WORD EXTERNAL; DECLARE pCharRet POINTER; END;
+
+DECLARE pVidCfg POINTER EXTERNAL,       /* 2F1E */
+   vid BASED pVidCfg STRUCTURE (rgb0 (10) BYTE, cFrames BYTE,
+      rgb1 (21) BYTE, rgbFrames (1) BYTE),
+   cScrCols WORD EXTERNAL,               /* 2F22 */
+   cScrLines WORD EXTERNAL,               /* 2F24 */
+   sbNull BYTE EXTERNAL,                 /* 0D8C empty string */
+   rgbUpper (256) BYTE EXTERNAL;         /* 0E8D upper case map */
+
+/* ------------------------------------------------------------------ */
+DoFormEx: PROCEDURE (pForm, frame, col, row, pValidate, pRec, pInit) PUBLIC REENTRANT;
+   DECLARE (pForm, frame, col, row) WORD, pValidate POINTER, (pRec, pInit) WORD;
+   DECLARE form BASED pForm FormType, rec BASED pRec BYTE, init BASED pInit BYTE;
+   DECLARE state StateType;
+   DECLARE erc WORD;
+   CALL FormOpen(.state, .form, frame, col, row);
+   IF pInit <> 0FFFFH THEN CALL FormShowValues(.state, .init);
+   DO WHILE FormEdit(.rec, .state);
+      IF (erc := CallProc(.state, .rec, pValidate)) = 0 THEN GOTO done;
+      CALL FormShowErc(.state, erc, form.msgAttr);
+   END;
+done:
+   CALL FormClose(.state);
+END DoFormEx;
+
+DoForm: PROCEDURE (pRec, pForm, frame, col, row, pInit) BYTE PUBLIC REENTRANT;
+   DECLARE (pRec, pForm, frame, col, row, pInit) WORD;
+   DECLARE form BASED pForm FormType, rec BASED pRec BYTE, init BASED pInit BYTE;
+   DECLARE state StateType;
+   DECLARE fOk BYTE;
+   CALL FormOpen(.state, .form, frame, col, row);
+   IF pInit <> 0FFFFH THEN CALL FormShowValues(.state, .init);
+   fOk = FormEdit(.rec, .state);
+   CALL FormClose(.state);
+   RETURN fOk;
+END DoForm;
+
+FormOpenShow: PROCEDURE (pState, pForm, frame, col, row, pRec) PUBLIC REENTRANT;
+   DECLARE (pState, pForm, frame, col, row, pRec) WORD;
+   DECLARE state BASED pState StateType, form BASED pForm FormType,
+      rec BASED pRec BYTE;
+   CALL FormOpen(.state, .form, frame, col, row);
+   CALL FormShowValues(.state, .rec);
+END FormOpenShow;
+
+FormOpen: PROCEDURE (pState, pForm, frame, col, row) PUBLIC REENTRANT;
+   DECLARE (pState, pForm, frame, col, row) WORD;
+   DECLARE state BASED pState StateType, form BASED pForm FormType;
+   DECLARE x0 WORD;
+   DECLARE y0 WORD;
+   DECLARE cxMax WORD;
+   DECLARE cyMax WORD;
+   DECLARE absCol WORD;
+   DECLARE absRow WORD;
+   DECLARE pBuf POINTER;
+   DECLARE colT WORD;
+   DECLARE rowT WORD;
+   DECLARE i WORD;
+   DECLARE pLine WORD;
+   DECLARE cbStep WORD;
+   DECLARE pFrame POINTER;
+   DECLARE fr BASED pFrame FrameType, buf BASED pBuf (1) WORD,
+      line BASED pLine LineType;
+   IF frame = 0FFFFH THEN
+   DO;
+      y0, x0 = 0;
+      cxMax = cScrCols;
+      cyMax = cScrLines;
+   END;
+   ELSE
+   DO;
+      IF vid.cFrames <= frame THEN CALL CheckErc(500);
+      pFrame = @vid.rgbFrames(frame * 20);
+      x0 = fr.col0;
+      y0 = fr.row0;
+      cxMax = fr.cols;
+      cyMax = fr.rows;
+   END;
+   IF col = 0FFH THEN col = SHR(cxMax - form.cols, 1);
+   IF row = 0FFH THEN row = SHR(cyMax - form.rows, 1);
+   IF INT(col) < 0 OR col + form.cols > cxMax OR INT(row) < 0
+      OR row + form.rows > cyMax THEN CALL CheckErc(500);
+   absCol = col + x0;
+   absRow = row + y0;
+   CALL CheckErc(MemAlloc(@pBuf, SHL(form.cols * form.rows, 1)));
+   state.pForm = .form;
+   state.frame = frame;
+   state.col = col;
+   state.row = row;
+   state.absCol = absCol;
+   state.absRow = absRow;
+   state.pBuf = pBuf;
+   CALL LockVideo;
+   i, rowT, colT = 0;
+   DO WHILE i < form.cbText;
+      pLine = .form.rgb(i);
+      cbStep = line.cb + 2;
+      IF line.cb <> 0 THEN
+      DO;
+         CALL VidReadCells(@buf(form.cols * rowT + colT), absCol + colT,
+            absRow + rowT, line.cb);
+         IF line.attr = 0FFH THEN
+         DO;
+            CALL VidFillCells(absCol + colT, absRow + rowT, line.cb, 0);
+            cbStep = 2;
+         END;
+         ELSE
+            CALL VidPutChars(absCol + colT, absRow + rowT, line.cb,
+               @line.rgb, line.attr);
+         colT = colT + line.cb;
+      END;
+      ELSE
+      DO;
+         colT = 0;
+         rowT = rowT + 1;
+      END;
+      i = i + cbStep;
+   END;
+   CALL UnLockVideo;
+END FormOpen;
+
+FormShowValues: PROCEDURE (pState, pRec) PUBLIC REENTRANT;
+   DECLARE (pState, pRec) WORD;
+   DECLARE state BASED pState StateType, rec BASED pRec BYTE;
+   DECLARE pForm WORD;
+   DECLARE i WORD;
+   DECLARE pFld WORD;
+   DECLARE form BASED pForm FormType, fld BASED pFld FieldType;
+   pForm = state.pForm;
+   i = 0;
+   DO WHILE i < form.cbFields;
+      pFld = .form.rgb(form.cbText + i);
+      CALL FieldShow(.state, .fld, .rec);
+      i = i + FieldSize(.fld);
+   END;
+END FormShowValues;
+
+FormEdit: PROCEDURE (pRec, pState) BYTE PUBLIC REENTRANT;
+   DECLARE (pRec, pState) WORD;
+   DECLARE rec BASED pRec BYTE, state BASED pState StateType;
+   DECLARE pFld WORD;
+   DECLARE erc WORD;
+   pFld = 0FFFFH;
+   erc = 0;
+again:
+   IF NOT FormEditLoop(.state, pFld, erc) THEN RETURN FALSE;
+   IF (erc := FormParseAll(.rec, .state, .pFld)) <> 0 THEN GOTO again;
+   RETURN TRUE;
+END FormEdit;
+
+FormShowErc: PROCEDURE (pState, erc, attr) PUBLIC REENTRANT;
+   DECLARE (pState, erc) WORD, attr BYTE;
+   DECLARE state BASED pState StateType;
+   DECLARE sb SbType;
+   CALL GetErcText(@sb, erc);
+   CALL FormShowMsg(.state, .sb, attr);
+   IF erc <> 0 THEN CALL Beep;
+END FormShowErc;
+
+FormShowMsg: PROCEDURE (pState, psb, attr) PUBLIC REENTRANT;
+   DECLARE (pState, psb) WORD, attr BYTE;
+   DECLARE state BASED pState StateType, sb BASED psb BYTE;
+   DECLARE pForm WORD;
+   DECLARE unused (5) WORD;     /* original frame has 10 unused bytes */
+   DECLARE form BASED pForm FormType;
+   pForm = state.pForm;
+   IF attr = 0FFH THEN attr = form.msgAttr;
+   IF psb = 0FFFFH THEN psb = .sbNull;
+   CALL DrawAligned(form.msgCol + state.absCol, form.msgRow + state.absRow,
+      form.msgWidth, form.msgAlign, .sb, attr, 0FFFFH);
+END FormShowMsg;
+
+FormClose: PROCEDURE (pState) PUBLIC REENTRANT;
+   DECLARE pState WORD;
+   DECLARE state BASED pState StateType;
+   DECLARE pForm WORD;
+   DECLARE absCol WORD;
+   DECLARE absRow WORD;
+   DECLARE pBuf POINTER;
+   DECLARE colT WORD;
+   DECLARE rowT WORD;
+   DECLARE i WORD;
+   DECLARE pLine WORD;
+   DECLARE cbStep WORD;
+   DECLARE form BASED pForm FormType, buf BASED pBuf (1) WORD,
+      line BASED pLine LineType;
+   pForm = state.pForm;
+   absCol = state.absCol;
+   absRow = state.absRow;
+   pBuf = state.pBuf;
+   CALL LockVideo;
+   i, rowT, colT = 0;
+   DO WHILE i < form.cbText;
+      pLine = .form.rgb(i);
+      cbStep = line.cb + 2;
+      IF line.cb <> 0 THEN
+      DO;
+         IF line.attr = 0FFH THEN cbStep = 2;
+         CALL VidPutCells(absCol + colT, absRow + rowT, line.cb,
+            @buf(form.cols * rowT + colT));
+         colT = colT + line.cb;
+      END;
+      ELSE
+      DO;
+         colT = 0;
+         rowT = rowT + 1;
+      END;
+      i = i + cbStep;
+   END;
+   CALL UnLockVideo;
+   CALL MemFree(state.pBuf);
+END FormClose;
+
+FormParseAll: PROCEDURE (pRec, pState, ppFldRet) WORD PUBLIC REENTRANT;
+   DECLARE (pRec, pState, ppFldRet) WORD;
+   DECLARE rec BASED pRec BYTE, state BASED pState StateType,
+      pFldRet BASED ppFldRet WORD;
+   DECLARE pForm WORD;
+   DECLARE i WORD;
+   DECLARE pFld WORD;
+   DECLARE erc WORD;
+   DECLARE form BASED pForm FormType, fld BASED pFld FieldType;
+   pForm = state.pForm;
+   i = 0;
+   DO WHILE i < form.cbFields;
+      pFld = .form.rgb(form.cbText + i);
+      IF (erc := FieldParse(.rec, .state, .fld)) <> 0 THEN
+      DO;
+         pFldRet = .fld;
+         RETURN erc;
+      END;
+      i = i + FieldSize(.fld);
+   END;
+   RETURN 0;
+END FormParseAll;
+
+/* keyboard loop; pFld = current field (0FFFFh: first editable field) */
+FormEditLoop: PROCEDURE (pState, pFld, erc) BYTE PUBLIC REENTRANT;
+   DECLARE (pState, pFld, erc) WORD;
+   DECLARE state BASED pState StateType, fld BASED pFld FieldType;
+   DECLARE pForm WORD;
+   DECLARE frCol WORD;
+   DECLARE frRow WORD;
+   DECLARE x WORD;
+   DECLARE y WORD;
+   DECLARE sb SbType;
+   DECLARE pad WORD;
+   DECLARE pFrame POINTER;
+   DECLARE i1 WORD;
+   DECLARE i2 WORD;
+   DECLARE i3 WORD;
+   DECLARE i4 WORD;
+   DECLARE i5 WORD;
+   DECLARE pNew WORD;
+   DECLARE fRedraw BYTE;
+   DECLARE fCursor BYTE;
+   DECLARE fFind BYTE;
+   DECLARE fOver BYTE;
+   DECLARE ch BYTE;
+   DECLARE form BASED pForm FormType, fr BASED pFrame FrameType;
+   pForm = state.pForm;
+   IF erc <> 0 THEN CALL FormShowErc(.state, erc, form.msgAttr);
+   IF state.frame <> 0FFFFH THEN
+   DO;
+      pFrame = @vid.rgbFrames(state.frame * 20);
+      frCol = fr.curCol;
+      frRow = fr.curRow;
+   END;
+   IF pFld = 0FFFFH THEN
+   DO;
+      pFld = NextField(.form, 0, 0);
+      IF pFld = 0FFFFH THEN RETURN FALSE;
+   END;
+   CALL FieldHome(.x, .y, .state, .fld);
+   IF state.frame <> 0FFFFH THEN
+      CALL CheckErc(PosFrameCursor(state.frame, x + state.col, y + state.row));
+   CALL FieldHighlight(.state, .fld, TRUE);
+   IF fld.kind = 0 THEN CALL FieldReadScreen(.sb, .state, .fld, .pad);
+   fFind, fCursor, fRedraw = FALSE;
+   fOver = FLedOn(7);
+   DO FOREVER;
+      CALL CheckErc(ReadKbd(@ch));
+      IF erc <> 0 THEN
+      DO;
+         CALL FormShowErc(.state, 0, 0);
+         erc = 0;
+      END;
+      DO CASE rgbKeyClass(ch);
+         GOTO doBeep;
+         /* 1: left */
+         DO;
+            IF x <> 0 THEN x = x - 1; ELSE GOTO doBeep;
+            fFind, fCursor = TRUE;
+         END;
+         /* 2: right */
+         DO;
+            IF x <> form.cols - 1 THEN x = x + 1; ELSE GOTO doBeep;
+            fFind, fCursor = TRUE;
+         END;
+         /* 3: up */
+         DO;
+            IF y <> 0 THEN y = y - 1; ELSE GOTO doBeep;
+            fFind, fCursor = TRUE;
+         END;
+         /* 4: down */
+         DO;
+            IF y <> form.rows - 1 THEN y = y + 1; ELSE GOTO doBeep;
+            fFind, fCursor = TRUE;
+         END;
+         /* 5: character */
+         DO;
+            IF pFld = 0FFFFH THEN GOTO doBeep;
+            DO CASE fld.kind;
+               DO;
+                  i1 = x - (fld.col + pad);
+                  IF NOT SbInsertCh(.sb, .i1, fld.width, ch, fOver) THEN GOTO doBeep;
+                  x = fld.col + pad + i1;
+                  fRedraw, fCursor = TRUE;
+               END;
+               IF NOT ChoiceSelect(.state, .fld, ch, TRUE) THEN GOTO doBeep;
+            END;
+         END;
+         /* 6: backspace */
+         DO;
+            IF pFld = 0FFFFH THEN GOTO doBeep;
+            DO CASE fld.kind;
+               DO;
+                  i2 = x - (fld.col + pad);
+                  IF NOT SbDeleteLeft(.sb, .i2, fOver) THEN GOTO doBeep;
+                  x = fld.col + pad + i2;
+                  fRedraw, fCursor = TRUE;
+               END;
+               GOTO doBeep;
+            END;
+         END;
+         /* 7: delete word */
+         DO;
+            IF pFld = 0FFFFH THEN GOTO doBeep;
+            DO CASE fld.kind;
+               DO;
+                  i3 = x - (fld.col + pad);
+                  IF NOT SbDeleteWord(.sb, .i3, fOver) THEN GOTO doBeep;
+                  x = fld.col + pad + i3;
+                  fRedraw, fCursor = TRUE;
+               END;
+               GOTO doBeep;
+            END;
+         END;
+         /* 8: delete */
+         DO;
+            IF pFld = 0FFFFH THEN GOTO doBeep;
+            DO CASE fld.kind;
+               DO;
+                  i4 = x - (fld.col + pad);
+                  IF NOT SbDeleteCh(.sb, .i4, fOver) THEN GOTO doBeep;
+                  x = fld.col + pad + i4;
+                  fRedraw, fCursor = TRUE;
+               END;
+               GOTO doBeep;
+            END;
+         END;
+         /* 9: overtype toggle */
+         DO;
+            fOver = NOT fOver;
+            CALL SetLed(7, fOver);
+         END;
+         /* 10: next field */
+         DO;
+            CALL FieldHome(.x, .y, .state, NextField(.form, x, y));
+            fFind, fCursor = TRUE;
+         END;
+         /* 11, 12: GO / CANCEL */
+         GOTO done;
+         GOTO done;
+         /* 13: start of field */
+         DO;
+            IF pFld = 0FFFFH THEN
+            DO;
+               x = 0;
+               fFind = TRUE;
+            END;
+            ELSE IF fld.kind = 0 THEN x = fld.col + pad;
+            ELSE x = fld.col;
+            fCursor = TRUE;
+         END;
+         /* 14: end of field */
+         DO;
+            IF pFld = 0FFFFH THEN
+            DO;
+               x = form.cols - 1;
+               fFind = TRUE;
+            END;
+            ELSE IF fld.kind = 0 THEN x = fld.col + pad + sb.cb;
+            ELSE x = fld.col + fld.width;
+            fCursor = TRUE;
+         END;
+         /* 15: top */
+         DO;
+            y = 0;
+            fFind, fCursor = TRUE;
+         END;
+         /* 16: bottom */
+         DO;
+            y = form.rows - 1;
+            fFind, fCursor = TRUE;
+         END;
+      END;
+      IF fRedraw THEN
+      DO;
+         i5 = x - (fld.col + pad);
+         CALL FieldDrawText(.state, .fld, .sb, TRUE, .pad);
+         x = fld.col + pad + i5;
+         fRedraw = FALSE;
+      END;
+      IF fCursor THEN
+      DO;
+         IF state.frame <> 0FFFFH THEN
+            CALL CheckErc(PosFrameCursor(state.frame, x + state.col, y + state.row));
+         fCursor = FALSE;
+      END;
+      IF fFind THEN
+      DO;
+         pNew = FieldAt(.form, x, y);
+         IF pFld <> pNew THEN
+         DO;
+            IF pFld <> 0FFFFH THEN CALL FieldHighlight(.state, .fld, FALSE);
+            IF (pFld := pNew) <> 0FFFFH THEN
+            DO;
+               CALL FieldHighlight(.state, .fld, TRUE);
+               IF fld.kind = 0 THEN CALL FieldReadScreen(.sb, .state, .fld, .pad);
+            END;
+         END;
+         fFind = FALSE;
+      END;
+      GOTO next;
+doBeep:
+      CALL Beep;
+next:
+   END;
+done:
+   IF pFld <> 0FFFFH THEN CALL FieldHighlight(.state, .fld, FALSE);
+   IF state.frame <> 0FFFFH THEN
+      CALL CheckErc(PosFrameCursor(state.frame, frCol, frRow));
+   RETURN ch = 1BH;
+END FormEditLoop;
+
+/* editable field containing (x, y), or 0FFFFh */
+FieldAt: PROCEDURE (pForm, x, y) WORD PUBLIC REENTRANT;
+   DECLARE (pForm, x, y) WORD;
+   DECLARE form BASED pForm FormType;
+   DECLARE i WORD;
+   DECLARE pFld WORD;
+   DECLARE fld BASED pFld FieldType;
+   i = 0;
+   DO WHILE i < form.cbFields;
+      pFld = .form.rgb(form.cbText + i);
+      IF fld.col <= x AND fld.col + fld.width >= x AND fld.row = y
+         AND fld.fEdit THEN RETURN pFld;
+      i = i + FieldSize(.fld);
+   END;
+   RETURN 0FFFFH;
+END FieldAt;
+
+/* first editable field after (x, y), wrapping around; 0FFFFh if none */
+NextField: PROCEDURE (pForm, x, y) WORD PUBLIC REENTRANT;
+   DECLARE (pForm, x, y) WORD;
+   DECLARE form BASED pForm FormType;
+   DECLARE i WORD;
+   DECLARE pFld WORD;
+   DECLARE fld BASED pFld FieldType;
+   DO FOREVER;
+      i = 0;
+      DO WHILE i < form.cbFields;
+         pFld = .form.rgb(form.cbText + i);
+         IF fld.fEdit THEN
+            IF fld.row > y OR (fld.row = y AND fld.col > x) THEN RETURN pFld;
+         i = i + FieldSize(.fld);
+      END;
+      IF x = 0 AND y = 0 THEN RETURN 0FFFFH;
+      y, x = 0;
+   END;
+END NextField;
+
+SbInsertCh: PROCEDURE (psb, pi, width, ch, fOver) BYTE PUBLIC REENTRANT;
+   DECLARE (psb, pi, width) WORD, (ch, fOver) BYTE;
+   DECLARE sb BASED psb (1) BYTE, i BASED pi WORD;
+   IF INT(i) < 0 THEN
+   DO;
+      i = 0;
+      fOver = FALSE;
+   END;
+   ELSE IF sb(0) <= i THEN
+   DO;
+      i = sb(0);
+      fOver = FALSE;
+   END;
+   IF NOT fOver THEN
+   DO;
+      IF sb(0) >= width THEN RETURN FALSE;
+      CALL MOVRB(@sb(i + 1), @sb(i + 2), sb(0) - i);
+      sb(0) = sb(0) + 1;
+   END;
+   sb(i + 1) = ch;
+   i = i + 1;
+   RETURN TRUE;
+END SbInsertCh;
+
+SbDeleteLeft: PROCEDURE (psb, pi, fOver) BYTE PUBLIC REENTRANT;
+   DECLARE (psb, pi) WORD, fOver BYTE;
+   DECLARE sb BASED psb (1) BYTE, i BASED pi WORD;
+   IF INT(sb(0)) < INT(i) THEN i = sb(0);
+   IF INT(i) <= 0 THEN RETURN FALSE;
+   i = i - 1;
+   IF NOT fOver THEN
+   DO;
+      sb(0) = sb(0) - 1;
+      CALL MOVB(@sb(i + 2), @sb(i + 1), sb(0) - i);
+   END;
+   RETURN TRUE;
+END SbDeleteLeft;
+
+SbDeleteWord: PROCEDURE (psb, pi, fOver) BYTE PUBLIC REENTRANT;
+   DECLARE (psb, pi) WORD, fOver BYTE;
+   DECLARE sb BASED psb (1) BYTE, i BASED pi WORD;
+   DECLARE j WORD;
+   IF INT(sb(0)) < INT(i) THEN i = sb(0);
+   IF INT(i) <= 0 THEN RETURN FALSE;
+   j = SKIPRB(@sb(1), ' ', i) + 1;
+   j = FINDRB(@sb(1), ' ', j) + 1;
+   IF NOT fOver THEN
+   DO;
+      CALL MOVB(@sb(i + 1), @sb(j + 1), sb(0) - i);
+      sb(0) = sb(0) - (i - j);
+   END;
+   i = j;
+   RETURN TRUE;
+END SbDeleteWord;
+
+SbDeleteCh: PROCEDURE (psb, pi, fOver) BYTE PUBLIC REENTRANT;
+   DECLARE (psb, pi) WORD, fOver BYTE;
+   DECLARE sb BASED psb (1) BYTE, i BASED pi WORD;
+   IF INT(i) < 0 OR sb(0) <= i THEN RETURN FALSE;
+   sb(0) = sb(0) - 1;
+   CALL MOVB(@sb(i + 2), @sb(i + 1), sb(0) - i);
+   RETURN TRUE;
+END SbDeleteCh;
+
+FieldShow: PROCEDURE (pState, pFld, pRec) PUBLIC REENTRANT;
+   DECLARE (pState, pFld, pRec) WORD;
+   DECLARE state BASED pState StateType, fld BASED pFld FieldType,
+      rec BASED pRec (1) BYTE;
+   DECLARE sb SbType;
+   DECLARE b BYTE;
+   DO CASE fld.kind;
+      DO;
+         CALL fld.pFmt(.sb, .rec(fld.off));
+         CALL FieldDrawText(.state, .fld, .sb, FALSE, 0FFFFH);
+      END;
+      DO;
+         CALL fld.pFmt(.b, .rec(fld.off));
+         CALL ChoiceShow(.state, .fld, b, FALSE);
+      END;
+   END;
+END FieldShow;
+
+FieldParse: PROCEDURE (pRec, pState, pFld) WORD PUBLIC REENTRANT;
+   DECLARE (pRec, pState, pFld) WORD;
+   DECLARE rec BASED pRec (1) BYTE, state BASED pState StateType,
+      fld BASED pFld FieldType;
+   DECLARE sb SbType;
+   DECLARE pb WORD;
+   DECLARE b BYTE;
+   DO CASE fld.kind;
+      DO;
+         CALL FieldReadScreen(.sb, .state, .fld, 0FFFFH);
+         IF sb.cb = 0 THEN
+         DO;
+            IF fld.fDefault THEN CALL CopySb(@sb, @fld.cb);
+            ELSE RETURN 31000;
+         END;
+         pb = .sb;
+      END;
+      DO;
+         b = ChoiceGetValue(.state, .fld);
+         IF b = 0FFH THEN
+         DO;
+            IF fld.fDefault THEN b = fld.align;
+            ELSE RETURN 31001;
+         END;
+         pb = .b;
+      END;
+   END;
+   RETURN CallProc(.rec(fld.off), pb, fld.pParse);
+END FieldParse;
+
+/* cursor position at the start of the field's contents */
+FieldHome: PROCEDURE (pX, pY, pState, pFld) PUBLIC REENTRANT;
+   DECLARE (pX, pY, pState, pFld) WORD;
+   DECLARE x BASED pX WORD, y BASED pY WORD, state BASED pState StateType,
+      fld BASED pFld FieldType;
+   DECLARE sb SbType;
+   DECLARE pad WORD;
+   DO CASE fld.kind;
+      DO;
+         CALL FieldReadScreen(.sb, .state, .fld, .pad);
+         x = fld.col + pad + sb.cb;
+      END;
+      x = fld.col;
+   END;
+   y = fld.row;
+END FieldHome;
+
+FieldHighlight: PROCEDURE (pState, pFld, fOn) PUBLIC REENTRANT;
+   DECLARE (pState, pFld) WORD, fOn BYTE;
+   DECLARE state BASED pState StateType, fld BASED pFld FieldType;
+   DECLARE col WORD;
+   DECLARE row WORD;
+   DECLARE cnt WORD;
+   DECLARE i WORD;
+   DECLARE pChc WORD;
+   DECLARE wAttr WORD;
+   DECLARE abAttr (2) BYTE AT (@wAttr);
+   DECLARE attr BYTE;
+   DECLARE chc BASED pChc ChoiceType;
+   CALL LockVideo;
+   DO CASE fld.kind;
+      DO;
+         col = fld.col + state.absCol;
+         row = fld.row + state.absRow;
+         cnt = fld.width;
+         IF fOn THEN attr = 5; ELSE attr = 0;
+         CALL VidFillAttr(col, row, cnt, attr);
+      END;
+      DO;
+         i = 0;
+         DO WHILE i < fld.cb;
+            pChc = .fld.rgb(i * 5);
+            col = chc.col + state.absCol;
+            row = fld.row + state.absRow;
+            cnt = chc.width;
+            wAttr = VidGetCell(col, row);
+            IF (abAttr(1) AND 1) = 0 THEN
+            DO;
+               IF fOn THEN attr = 4; ELSE attr = 0;
+            END;
+            ELSE
+            DO;
+               IF fOn THEN attr = 5; ELSE attr = 1;
+            END;
+            CALL VidFillAttr(col, row, cnt, attr);
+            IF fOn THEN attr = 5; ELSE attr = 0;
+            CALL VidFillAttr(col + cnt, row, chc.cbGap, attr);
+            i = i + 1;
+         END;
+      END;
+   END;
+   CALL UnLockVideo;
+END FieldHighlight;
+
+FieldSize: PROCEDURE (pFld) WORD PUBLIC REENTRANT;
+   DECLARE pFld WORD;
+   DECLARE fld BASED pFld FieldType;
+   DO CASE fld.kind;
+      RETURN fld.cb + 12H;
+      RETURN fld.cb * 5 + 12H;
+   END;
+END FieldSize;
+
+/* read the field's text from the screen into sb, strip leading/trailing
+   empty (0) cells; *pPadRet = number of leading empty cells */
+FieldReadScreen: PROCEDURE (psb, pState, pFld, pPadRet) PUBLIC REENTRANT;
+   DECLARE (psb, pState, pFld, pPadRet) WORD;
+   DECLARE sb BASED psb (1) BYTE, state BASED pState StateType,
+      fld BASED pFld FieldType, pad BASED pPadRet WORD;
+   DECLARE col WORD;
+   DECLARE row WORD;
+   DECLARE cnt WORD;
+   DECLARE k WORD;
+   col = fld.col + state.absCol;
+   row = fld.row + state.absRow;
+   cnt = fld.width;
+   CALL LockVideo;
+   CALL VidReadChars(@sb(1), col, row, cnt);
+   CALL UnLockVideo;
+   sb(0) = cnt;
+   k = SKIPB(@sb(1), 0, sb(0));
+   IF k = 0FFFFH THEN k = sb(0);
+   IF k <> 0 THEN
+   DO;
+      sb(0) = sb(0) - k;
+      CALL MOVB(@sb(k + 1), @sb(1), sb(0));
+   END;
+   IF pPadRet <> 0FFFFH THEN pad = k;
+   sb(0) = SKIPRB(@sb(1), 0, sb(0)) + 1;
+END FieldReadScreen;
+
+FieldDrawText: PROCEDURE (pState, pFld, psb, fHi, pPadRet) PUBLIC REENTRANT;
+   DECLARE (pState, pFld, psb) WORD, fHi BYTE, pPadRet WORD;
+   DECLARE state BASED pState StateType, fld BASED pFld FieldType,
+      sb BASED psb BYTE, pad BASED pPadRet WORD;
+   DECLARE attr BYTE;
+   IF fHi THEN attr = 5; ELSE attr = 0;
+   CALL DrawAligned(fld.col + state.absCol, fld.row + state.absRow, fld.width,
+      fld.align, .sb, attr, .pad);
+END FieldDrawText;
+
+/* draw sb in a width-cell area: align 0 left, 1 right, 2 centred */
+DrawAligned: PROCEDURE (col, row, width, align, psb, attr, pPadRet) PUBLIC REENTRANT;
+   DECLARE (col, row, width) WORD, align BYTE, psb WORD, attr BYTE, pPadRet WORD;
+   DECLARE sb BASED psb (1) BYTE, pad BASED pPadRet WORD;
+   DECLARE cb WORD;
+   DECLARE cbExtra WORD;
+   DECLARE padL WORD;
+   DECLARE padR WORD;
+   cb = sb(0);
+   IF width < cb THEN cb = width;
+   cbExtra = width - cb;
+   DO CASE align;
+      DO;
+         padL = 0;
+         padR = cbExtra;
+      END;
+      DO;
+         padL = cbExtra;
+         padR = 0;
+      END;
+      DO;
+         padL = SHR(cbExtra, 1);
+         padR = cbExtra - padL;
+      END;
+   END;
+   CALL LockVideo;
+   IF padL <> 0 THEN CALL VidFillCells(col, row, padL, SHL(DOUBLE(attr), 8));
+   CALL VidPutChars(col + padL, row, cb, @sb(1), attr);
+   IF padR <> 0 THEN CALL VidFillCells(col + padL + cb, row, padR, SHL(DOUBLE(attr), 8));
+   CALL UnLockVideo;
+   IF pPadRet <> 0FFFFH THEN pad = padL;
+END DrawAligned;
+
+/* value of the choice shown selected, 0FFh if none */
+ChoiceGetValue: PROCEDURE (pState, pFld) BYTE PUBLIC REENTRANT;
+   DECLARE (pState, pFld) WORD;
+   DECLARE state BASED pState StateType, fld BASED pFld FieldType;
+   DECLARE i WORD;
+   DECLARE pChc WORD;
+   DECLARE col WORD;
+   DECLARE row WORD;
+   DECLARE wAttr WORD;
+   DECLARE abAttr (2) BYTE AT (@wAttr);
+   DECLARE b BYTE;
+   DECLARE chc BASED pChc ChoiceType;
+   CALL LockVideo;
+   i = 0;
+   DO WHILE i < fld.cb;
+      pChc = .fld.rgb(i * 5);
+      col = chc.col + state.absCol;
+      row = fld.row + state.absRow;
+      wAttr = VidGetCell(col, row);
+      IF (abAttr(1) AND 1) = 0 THEN
+      DO;
+         b = chc.value;
+         GOTO found;
+      END;
+      i = i + 1;
+   END;
+   b = 0FFH;
+found:
+   CALL UnLockVideo;
+   RETURN b;
+END ChoiceGetValue;
+
+/* select the choice whose key is ch; FALSE if there is none */
+ChoiceSelect: PROCEDURE (pState, pFld, ch, fOn) BYTE PUBLIC REENTRANT;
+   DECLARE (pState, pFld) WORD, (ch, fOn) BYTE;
+   DECLARE state BASED pState StateType, fld BASED pFld FieldType;
+   DECLARE pSel WORD;
+   DECLARE i WORD;
+   DECLARE pChc WORD;
+   DECLARE col WORD;
+   DECLARE row WORD;
+   DECLARE cnt WORD;
+   DECLARE wAttr WORD;
+   DECLARE abAttr (2) BYTE AT (@wAttr);
+   DECLARE fFound BYTE;
+   DECLARE attr BYTE;
+   DECLARE chc BASED pChc ChoiceType, sel BASED pSel ChoiceType;
+   CALL LockVideo;
+   fFound = FALSE;
+   pSel = 0FFFFH;
+   i = 0;
+   DO WHILE i < fld.cb;
+      pChc = .fld.rgb(i * 5);
+      col = chc.col + state.absCol;
+      row = fld.row + state.absRow;
+      cnt = chc.width;
+      IF rgbUpper(chc.key) = rgbUpper(ch) THEN
+      DO;
+         IF fOn THEN attr = 4; ELSE attr = 0;
+         fFound = TRUE;
+      END;
+      ELSE
+      DO;
+         IF fOn THEN attr = 5; ELSE attr = 1;
+         wAttr = VidGetCell(col, row);
+         IF (abAttr(1) AND 1) = 0 THEN pSel = .chc;
+      END;
+      CALL VidFillAttr(col, row, cnt, attr);
+      i = i + 1;
+   END;
+   IF NOT fFound AND pSel <> 0FFFFH THEN
+   DO;
+      col = sel.col + state.absCol;
+      row = fld.row + state.absRow;
+      cnt = sel.width;
+      IF fOn THEN attr = 4; ELSE attr = 0;
+      CALL VidFillAttr(col, row, cnt, attr);
+   END;
+   CALL UnLockVideo;
+   RETURN fFound;
+END ChoiceSelect;
+
+/* show the choices with value val selected */
+ChoiceShow: PROCEDURE (pState, pFld, val, fOn) PUBLIC REENTRANT;
+   DECLARE (pState, pFld) WORD, (val, fOn) BYTE;
+   DECLARE state BASED pState StateType, fld BASED pFld FieldType;
+   DECLARE i WORD;
+   DECLARE pChc WORD;
+   DECLARE col WORD;
+   DECLARE row WORD;
+   DECLARE cnt WORD;
+   DECLARE attr BYTE;
+   DECLARE chc BASED pChc ChoiceType;
+   CALL LockVideo;
+   i = 0;
+   DO WHILE i < fld.cb;
+      pChc = .fld.rgb(i * 5);
+      col = chc.col + state.absCol;
+      row = fld.row + state.absRow;
+      cnt = chc.width;
+      IF chc.value = val THEN
+      DO;
+         IF fOn THEN attr = 4; ELSE attr = 0;
+      END;
+      ELSE
+      DO;
+         IF fOn THEN attr = 5; ELSE attr = 1;
+      END;
+      CALL VidFillAttr(col, row, cnt, attr);
+      i = i + 1;
+   END;
+   CALL UnLockVideo;
+END ChoiceShow;
+
+GetErcText: PROCEDURE (psb, erc) PUBLIC REENTRANT;
+   DECLARE psb POINTER, erc WORD;
+   DECLARE sb BASED psb BYTE;
+   IF erc = 0 THEN sb = 0;
+   ELSE IF erc = 31000 THEN CALL CopySb(@sb, @sbErc31000);
+   ELSE IF erc = 31001 THEN CALL CopySb(@sb, @sbErc31001);
+   ELSE IF erc = 31002 THEN CALL CopySb(@sb, @sbErc31002);
+   ELSE IF erc = 31003 THEN CALL CopySb(@sb, @sbErc31003);
+   ELSE IF erc = 31004 THEN CALL CopySb(@sb, @sbErc31004);
+   ELSE IF erc = 31005 THEN CALL CopySb(@sb, @sbErc31005);
+   ELSE CALL GetErcMsg(@sb, erc);
+END GetErcText;
+
+END Forms;

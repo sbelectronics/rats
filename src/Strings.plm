@@ -1,0 +1,764 @@
+$MEDIUM OPTIMIZE(2)
+/* Strings: string/format library (image 5CD2-6BB4, frame 05CD).
+   A later, extended version of the CTOS tools' String module
+   (after CTOS FindString.Plm); procedure names follow it.
+   Strings are "sb": length byte followed by up to 255 characters.
+     AppendCh, AppendRgch, AppendSb, CopySb      append / copy
+     MakeFileSpec, ParseFileSpec                 {node}[vol]<dir>file
+     DeleteRgch, SubSb, InsertSb, GetField       substring editing
+     FAlphaCh, FNumericCh, FChInSb, FNumericSb   classification
+     FEqRgch, FEqSb, FPrefixSb, FSuffixSb, CompareRgch, CompareSb
+     FIntFromRgch/Sb, FDwFromRgch/Sb, FWFromRgch/Sb, FFixedFromRgch/Sb
+     SbFromInt, SbFromNumber, SbFromW, SbFromFixed,
+     SbHexFromW, SbRomanFromW, SplitSb, TrimSb, SbFromNumberA
+   CONST = DGROUP 0D82-10DE: DATA in declaration order, then the inline
+   constant of FNumericSb (10CF). */
+Strings: DO;
+
+DECLARE TRUE LITERALLY '0FFH', FALSE LITERALLY '0';
+DECLARE SbType LITERALLY 'STRUCTURE (cch BYTE, rgch (255) BYTE)';
+DECLARE UcbType LITERALLY 'STRUCTURE (reserved WORD, defaultVol (13) BYTE,
+        defaultDir (13) BYTE, defaultPW (13) BYTE, prefix (41) BYTE,
+        defaultNode (13) BYTE)';
+
+/* ---- CONST (DGROUP 0D82..) ---- */
+DECLARE rgwPow10 (5) WORD DATA (1, 10, 100, 1000, 10000),        /* 0D82 */
+        sbNull BYTE PUBLIC DATA (0),                               /* 0D8C */
+        rgbLower (256) BYTE PUBLIC DATA (                          /* 0D8D */
+        00H, 01H, 02H, 03H, 04H, 05H, 06H, 07H, 08H, 09H, 0AH, 0BH, 0CH, 0DH, 0EH, 0FH,
+        10H, 11H, 12H, 13H, 14H, 15H, 16H, 17H, 18H, 19H, 1AH, 1BH, 1CH, 1DH, 1EH, 1FH,
+        20H, 21H, 22H, 23H, 24H, 25H, 26H, 27H, 28H, 29H, 2AH, 2BH, 2CH, 2DH, 2EH, 2FH,
+        30H, 31H, 32H, 33H, 34H, 35H, 36H, 37H, 38H, 39H, 3AH, 3BH, 3CH, 3DH, 3EH, 3FH,
+        40H, 61H, 62H, 63H, 64H, 65H, 66H, 67H, 68H, 69H, 6AH, 6BH, 6CH, 6DH, 6EH, 6FH,
+        70H, 71H, 72H, 73H, 74H, 75H, 76H, 77H, 78H, 79H, 7AH, 5BH, 5CH, 5DH, 5EH, 5FH,
+        60H, 61H, 62H, 63H, 64H, 65H, 66H, 67H, 68H, 69H, 6AH, 6BH, 6CH, 6DH, 6EH, 6FH,
+        70H, 71H, 72H, 73H, 74H, 75H, 76H, 77H, 78H, 79H, 7AH, 7BH, 7CH, 7DH, 7EH, 7FH,
+        80H, 81H, 82H, 83H, 84H, 85H, 86H, 87H, 88H, 89H, 8AH, 8BH, 8CH, 8DH, 8EH, 8FH,
+        90H, 91H, 92H, 93H, 94H, 95H, 96H, 97H, 98H, 99H, 9AH, 9BH, 9CH, 9DH, 9EH, 9FH,
+        0A0H, 0A1H, 0A2H, 0A3H, 0A4H, 0A5H, 0A6H, 0A7H, 0A8H, 0A9H, 0AAH, 0ABH, 0ACH, 0ADH, 0AEH, 0AFH,
+        0B0H, 0B1H, 0B2H, 0B3H, 0B4H, 0B5H, 0B6H, 0B7H, 0B8H, 0B9H, 0BAH, 0BBH, 0BCH, 0BDH, 0BEH, 0BFH,
+        0C0H, 0C1H, 0C2H, 0C3H, 0C4H, 0C5H, 0C6H, 0C7H, 0C8H, 0C9H, 0CAH, 0CBH, 0CCH, 0CDH, 0CEH, 0CFH,
+        0D0H, 0D1H, 0D2H, 0D3H, 0D4H, 0D5H, 0D6H, 0D7H, 0D8H, 0D9H, 0DAH, 0DBH, 0DCH, 0DDH, 0DEH, 0DFH,
+        0E0H, 0E1H, 0E2H, 0E3H, 0E4H, 0E5H, 0E6H, 0E7H, 0E8H, 0E9H, 0EAH, 0EBH, 0ECH, 0EDH, 0EEH, 0EFH,
+        0F0H, 0F1H, 0F2H, 0F3H, 0F4H, 0F5H, 0F6H, 0F7H, 0F8H, 0F9H, 0FAH, 0FBH, 0FCH, 0FDH, 0FEH, 0FFH),
+        rgbUpper (256) BYTE PUBLIC DATA (                          /* 0E8D */
+        00H, 01H, 02H, 03H, 04H, 05H, 06H, 07H, 08H, 09H, 0AH, 0BH, 0CH, 0DH, 0EH, 0FH,
+        10H, 11H, 12H, 13H, 14H, 15H, 16H, 17H, 18H, 19H, 1AH, 1BH, 1CH, 1DH, 1EH, 1FH,
+        20H, 21H, 22H, 23H, 24H, 25H, 26H, 27H, 28H, 29H, 2AH, 2BH, 2CH, 2DH, 2EH, 2FH,
+        30H, 31H, 32H, 33H, 34H, 35H, 36H, 37H, 38H, 39H, 3AH, 3BH, 3CH, 3DH, 3EH, 3FH,
+        40H, 41H, 42H, 43H, 44H, 45H, 46H, 47H, 48H, 49H, 4AH, 4BH, 4CH, 4DH, 4EH, 4FH,
+        50H, 51H, 52H, 53H, 54H, 55H, 56H, 57H, 58H, 59H, 5AH, 5BH, 5CH, 5DH, 5EH, 5FH,
+        60H, 41H, 42H, 43H, 44H, 45H, 46H, 47H, 48H, 49H, 4AH, 4BH, 4CH, 4DH, 4EH, 4FH,
+        50H, 51H, 52H, 53H, 54H, 55H, 56H, 57H, 58H, 59H, 5AH, 7BH, 7CH, 7DH, 7EH, 7FH,
+        80H, 81H, 82H, 83H, 84H, 85H, 86H, 87H, 88H, 89H, 8AH, 8BH, 8CH, 8DH, 8EH, 8FH,
+        90H, 91H, 92H, 93H, 94H, 95H, 96H, 97H, 98H, 99H, 9AH, 9BH, 9CH, 9DH, 9EH, 9FH,
+        0A0H, 0A1H, 0A2H, 0A3H, 0A4H, 0A5H, 0A6H, 0A7H, 0A8H, 0A9H, 0AAH, 0ABH, 0ACH, 0ADH, 0AEH, 0AFH,
+        0B0H, 0B1H, 0B2H, 0B3H, 0B4H, 0B5H, 0B6H, 0B7H, 0B8H, 0B9H, 0BAH, 0BBH, 0BCH, 0BDH, 0BEH, 0BFH,
+        0C0H, 0C1H, 0C2H, 0C3H, 0C4H, 0C5H, 0C6H, 0C7H, 0C8H, 0C9H, 0CAH, 0CBH, 0CCH, 0CDH, 0CEH, 0CFH,
+        0D0H, 0D1H, 0D2H, 0D3H, 0D4H, 0D5H, 0D6H, 0D7H, 0D8H, 0D9H, 0DAH, 0DBH, 0DCH, 0DDH, 0DEH, 0DFH,
+        0E0H, 0E1H, 0E2H, 0E3H, 0E4H, 0E5H, 0E6H, 0E7H, 0E8H, 0E9H, 0EAH, 0EBH, 0ECH, 0EDH, 0EEH, 0EFH,
+        0F0H, 0F1H, 0F2H, 0F3H, 0F4H, 0F5H, 0F6H, 0F7H, 0F8H, 0F9H, 0FAH, 0FBH, 0FCH, 0FDH, 0FEH, 0FFH),
+        /* collating sequence (case-insensitive, punctuation < digits < letters) */
+        rgbCollate (256) BYTE PUBLIC DATA (                        /* 0F8D */
+        45H, 46H, 47H, 48H, 49H, 4AH, 4BH, 4CH, 4DH, 4EH, 4FH, 50H, 51H, 52H, 53H, 54H,
+        55H, 56H, 57H, 58H, 00H, 59H, 5AH, 5BH, 5CH, 5DH, 5EH, 5FH, 60H, 61H, 62H, 63H,
+        00H, 07H, 0AH, 0CH, 0DH, 0EH, 0FH, 08H, 15H, 16H, 11H, 12H, 02H, 01H, 05H, 13H,
+        3BH, 3CH, 3DH, 3EH, 3FH, 40H, 41H, 42H, 43H, 44H, 04H, 03H, 17H, 0BH, 18H, 06H,
+        10H, 21H, 22H, 23H, 24H, 25H, 26H, 27H, 28H, 29H, 2AH, 2BH, 2CH, 2DH, 2EH, 2FH,
+        30H, 31H, 32H, 33H, 34H, 35H, 36H, 37H, 38H, 39H, 3AH, 19H, 14H, 1AH, 1DH, 1EH,
+        09H, 21H, 22H, 23H, 24H, 25H, 26H, 27H, 28H, 29H, 2AH, 2BH, 2CH, 2DH, 2EH, 2FH,
+        30H, 31H, 32H, 33H, 34H, 35H, 36H, 37H, 38H, 39H, 3AH, 1BH, 1FH, 1CH, 20H, 64H,
+        01H, 65H, 66H, 67H, 68H, 69H, 6AH, 6BH, 6CH, 6DH, 6EH, 6FH, 70H, 71H, 72H, 73H,
+        74H, 75H, 76H, 77H, 78H, 79H, 7AH, 7BH, 7CH, 7DH, 7EH, 7FH, 80H, 81H, 82H, 83H,
+        84H, 85H, 86H, 87H, 88H, 89H, 8AH, 8BH, 8CH, 8DH, 8EH, 8FH, 90H, 91H, 92H, 93H,
+        94H, 95H, 96H, 97H, 98H, 99H, 9AH, 9BH, 9CH, 9DH, 9EH, 9FH, 0A0H, 0A1H, 0A2H, 0A3H,
+        0A4H, 0A5H, 0A6H, 0A7H, 0A8H, 0A9H, 0AAH, 0ABH, 0ACH, 0ADH, 0AEH, 0AFH, 0B0H, 0B1H, 0B2H, 0B3H,
+        0B4H, 0B5H, 0B6H, 0B7H, 0B8H, 0B9H, 0BAH, 0BBH, 0BCH, 0BDH, 0BEH, 0BFH, 0C0H, 0C1H, 0C2H, 0C3H,
+        0C4H, 0C5H, 0C6H, 0C7H, 0C8H, 0C9H, 0CAH, 0CBH, 0CCH, 0CDH, 0CEH, 0CFH, 0D0H, 0D1H, 0D2H, 0D3H,
+        0D4H, 0D5H, 0D6H, 0D7H, 0D8H, 0D9H, 0DAH, 0DBH, 0DCH, 0DDH, 0DEH, 0DFH, 0E0H, 0E1H, 0E2H, 0E3H),
+        rgchHex (*) BYTE DATA ('0123456789ABCDEF');                 /* 108D */
+
+/* ---- externals ---- */
+UlCmpB: PROCEDURE (prgch1, prgch2, cch) WORD EXTERNAL;   /* OsSub 3 */
+   DECLARE prgch1 POINTER, prgch2 POINTER, cch WORD; END;
+GetUcb: PROCEDURE (pUcbRet, sUcbMax) WORD EXTERNAL;
+   DECLARE pUcbRet POINTER, sUcbMax WORD; END;
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+NotNil: PROCEDURE (p) BYTE EXTERNAL; DECLARE p POINTER; END;
+/* fixed-point fraction helpers (Mod55FC.asm): */
+FracDiv: PROCEDURE (wNum, wDen) WORD EXTERNAL;   /* wNum*10000h/wDen, rounded */
+   DECLARE (wNum, wDen) WORD; END;
+FracMul: PROCEDURE (w, wFrac) WORD EXTERNAL;     /* w*wFrac/10000h, rounded */
+   DECLARE (w, wFrac) WORD; END;
+
+
+AppendCh: PROCEDURE (psbDst, ch) PUBLIC REENTRANT;
+   DECLARE psbDst POINTER, sbDst BASED psbDst SbType;
+   DECLARE ch BYTE;
+   IF sbDst.cch < LENGTH(sbDst.rgch) THEN
+      DO;
+      sbDst.rgch(sbDst.cch) = ch;
+      sbDst.cch = sbDst.cch + 1;
+      END;
+END AppendCh;
+
+
+AppendRgch: PROCEDURE (psbDst, prgch, cch) PUBLIC REENTRANT;
+   DECLARE psbDst POINTER, sbDst BASED psbDst SbType;
+   DECLARE prgch POINTER, rgch BASED prgch (1) BYTE;
+   DECLARE cch WORD;
+   DECLARE cchRemain WORD;
+   cchRemain = LENGTH(sbDst.rgch) - sbDst.cch;
+   IF cch > cchRemain THEN
+      cch = cchRemain;
+   CALL MOVB(@rgch, @sbDst.rgch(sbDst.cch), cch);
+   sbDst.cch = sbDst.cch + cch;
+END AppendRgch;
+
+
+AppendSb: PROCEDURE (psbDst, psbSrc) PUBLIC REENTRANT;
+   DECLARE psbDst POINTER, sbDst BASED psbDst SbType;
+   DECLARE psbSrc POINTER, sbSrc BASED psbSrc SbType;
+   CALL AppendRgch(@sbDst, @sbSrc.rgch, sbSrc.cch);
+END AppendSb;
+
+
+/* build "{node}[vol]<dir>file" from its parts (nil pointers are skipped) */
+MakeFileSpec: PROCEDURE (psbRet, psbNode, psbVol, psbDir, psbFile) PUBLIC REENTRANT;
+   DECLARE psbRet POINTER, sbRet BASED psbRet SbType;
+   DECLARE psbNode POINTER, sbNode BASED psbNode SbType;
+   DECLARE psbVol POINTER, sbVol BASED psbVol SbType;
+   DECLARE psbDir POINTER, sbDir BASED psbDir SbType;
+   DECLARE psbFile POINTER, sbFile BASED psbFile SbType;
+   sbRet.cch = 0;
+   IF NotNil(psbNode) THEN IF sbNode.cch <> 0 THEN
+      DO;
+      CALL AppendCh(@sbRet, '{');
+      CALL AppendSb(@sbRet, @sbNode);
+      CALL AppendCh(@sbRet, '}');
+      END;
+   IF NotNil(psbVol) THEN
+      DO;
+      CALL AppendCh(@sbRet, '[');
+      CALL AppendSb(@sbRet, @sbVol);
+      CALL AppendCh(@sbRet, ']');
+      END;
+   IF NotNil(psbDir) THEN
+      DO;
+      CALL AppendCh(@sbRet, '<');
+      CALL AppendSb(@sbRet, @sbDir);
+      CALL AppendCh(@sbRet, '>');
+      END;
+   IF NotNil(psbFile) THEN
+      CALL AppendSb(@sbRet, @sbFile);
+END MakeFileSpec;
+
+
+CopySb: PROCEDURE (psbDst, psbSrc) PUBLIC REENTRANT;
+   DECLARE psbDst POINTER, sbDst BASED psbDst SbType;
+   DECLARE psbSrc POINTER, sbSrc BASED psbSrc SbType;
+   CALL MOVB(@sbSrc, @sbDst, DOUBLE(sbSrc.cch) + 1);
+END CopySb;
+
+
+/* delete cch characters at ich */
+DeleteRgch: PROCEDURE (psb, ich, cch) PUBLIC REENTRANT;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   DECLARE ich WORD, cch WORD;
+   IF sb.cch < ich THEN
+      ich = sb.cch;
+   IF sb.cch - ich < cch THEN
+      cch = sb.cch - ich;
+   sb.cch = sb.cch - cch;
+   CALL MOVB(@sb.rgch(cch + ich), @sb.rgch(ich), sb.cch - ich);
+END DeleteRgch;
+
+
+/* sbDst = cch characters of sbSrc starting at ich */
+SubSb: PROCEDURE (psbDst, psbSrc, ich, cch) PUBLIC REENTRANT;
+   DECLARE psbDst POINTER, sbDst BASED psbDst SbType;
+   DECLARE psbSrc POINTER, sbSrc BASED psbSrc SbType;
+   DECLARE ich WORD, cch WORD;
+   IF sbSrc.cch < ich THEN
+      ich = sbSrc.cch;
+   IF sbSrc.cch - ich < cch THEN
+      cch = sbSrc.cch - ich;
+   sbDst.cch = 0;
+   CALL AppendRgch(@sbDst, @sbSrc.rgch(ich), cch);
+END SubSb;
+
+
+FAlphaCh: PROCEDURE (ch) BYTE PUBLIC REENTRANT;
+   DECLARE ch BYTE;
+   RETURN (ch >= 'A' AND ch <= 'Z') OR (ch >= 'a' AND ch <= 'z');
+END FAlphaCh;
+
+
+FChInSb: PROCEDURE (ch, psb) BYTE PUBLIC REENTRANT;
+   DECLARE ch BYTE;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   RETURN FINDB(@sb.rgch, ch, sb.cch) <> 0FFFFH;
+END FChInSb;
+
+
+FEqRgch: PROCEDURE (prgch1, prgch2, cch) BYTE PUBLIC REENTRANT;
+   DECLARE prgch1 POINTER, rgch1 BASED prgch1 (1) BYTE;
+   DECLARE prgch2 POINTER, rgch2 BASED prgch2 (1) BYTE;
+   DECLARE cch WORD;
+   RETURN UlCmpB(prgch1, prgch2, cch) = 0FFFFH;
+END FEqRgch;
+
+
+FEqSb: PROCEDURE (psb1, psb2) BYTE PUBLIC REENTRANT;
+   DECLARE psb1 POINTER, sb1 BASED psb1 SbType;
+   DECLARE psb2 POINTER, sb2 BASED psb2 SbType;
+   IF sb1.cch = sb2.cch THEN
+      RETURN FEqRgch(@sb1.rgch, @sb2.rgch, sb1.cch);
+   ELSE
+      RETURN FALSE;
+END FEqSb;
+
+
+/* sbDst = TAB-separated field number iField of sbSrc */
+GetField: PROCEDURE (psbDst, psbSrc, iField) BYTE PUBLIC REENTRANT;
+   DECLARE psbDst POINTER, sbDst BASED psbDst SbType;
+   DECLARE psbSrc POINTER, sbSrc BASED psbSrc SbType;
+   DECLARE iField WORD;
+   DECLARE ichFirst WORD;
+   DECLARE ichLim WORD;
+   DECLARE i WORD;
+   DECLARE dich WORD;
+   ichFirst, i = 0;
+   DO WHILE sbSrc.cch > ichFirst;
+      dich = FINDB(@sbSrc.rgch(ichFirst), 9, sbSrc.cch - ichFirst);
+      IF dich = 0FFFFH THEN
+         ichLim = sbSrc.cch;
+      ELSE
+         ichLim = ichFirst + dich;
+      IF iField = i THEN
+         DO;
+         CALL SubSb(@sbDst, @sbSrc, ichFirst, ichLim - ichFirst);
+         RETURN TRUE;
+         END;
+      i = i + 1;
+      ichFirst = ichLim + 1;
+   END;
+   RETURN FALSE;
+END GetField;
+
+
+/* signed decimal with optional '+'/'-' sign, -7FFFh..7FFFh */
+FIntFromRgch: PROCEDURE (ow, prgch, cch) BYTE PUBLIC REENTRANT;
+   DECLARE ow WORD, w BASED ow WORD;
+   DECLARE prgch POINTER, rgch BASED prgch (1) BYTE;
+   DECLARE cch WORD;
+   DECLARE ich WORD;
+   DECLARE fNeg WORD;
+   DECLARE wVal WORD;
+   IF cch = 0 THEN
+      RETURN FALSE;
+   IF rgch(0) = '-' THEN
+      DO;
+      ich = 1;
+      fNeg = TRUE;
+      END;
+   ELSE IF rgch(0) = '+' THEN
+      DO;
+      ich = 1;
+      fNeg = FALSE;
+      END;
+   ELSE
+      fNeg, ich = 0;
+   IF NOT FWFromRgch(.wVal, @rgch(ich), cch - ich) THEN
+      RETURN FALSE;
+   IF wVal > 7FFFH THEN
+      RETURN FALSE;
+   IF fNeg THEN
+      w = -wVal;
+   ELSE
+      w = wVal;
+   RETURN TRUE;
+END FIntFromRgch;
+
+
+FIntFromSb: PROCEDURE (ow, psb) BYTE PUBLIC REENTRANT;
+   DECLARE ow WORD, w BASED ow WORD;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   RETURN FIntFromRgch(.w, @sb.rgch, sb.cch);
+END FIntFromSb;
+
+
+/* digits, the fraction characters 06h (1/2) and 10h (1/4), '.' */
+FNumericCh: PROCEDURE (ch) BYTE PUBLIC REENTRANT;
+   DECLARE ch BYTE;
+   RETURN (ch >= '0' AND ch <= '9') OR ch = 6 OR ch = 10H OR ch = '.';
+END FNumericCh;
+
+
+FNumericSb: PROCEDURE (psb) BYTE PUBLIC REENTRANT;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   DECLARE pUnused POINTER;
+   IF sb.cch <> 0 THEN IF FChInSb(sb.rgch(0), @(15, '+-0123456789', 6, 10H, '.')) THEN
+      RETURN TRUE;
+   RETURN FALSE;
+END FNumericSb;
+
+
+/* split "{node}[vol]<dir>file"; missing parts get the user's defaults */
+ParseFileSpec: PROCEDURE (psbNode, psbVol, psbDir, psbFile, psbSpec) BYTE PUBLIC REENTRANT;
+   DECLARE psbNode POINTER, sbNode BASED psbNode SbType;
+   DECLARE psbVol POINTER, sbVol BASED psbVol SbType;
+   DECLARE psbDir POINTER, sbDir BASED psbDir SbType;
+   DECLARE psbFile POINTER, sbFile BASED psbFile SbType;
+   DECLARE psbSpec POINTER, sbSpec BASED psbSpec SbType;
+   DECLARE ich WORD;
+   DECLARE cch WORD;
+   DECLARE ucb UcbType;
+   CALL CheckErc(GetUcb(@ucb, SIZE(ucb)));
+   IF NotNil(psbNode) THEN
+      sbNode.cch = 0;
+   IF NotNil(psbVol) THEN
+      sbVol.cch = 0;
+   IF NotNil(psbDir) THEN
+      sbDir.cch = 0;
+   IF NotNil(psbFile) THEN
+      sbFile.cch = 0;
+   ich = 0;
+   IF sbSpec.rgch(ich) = '{' THEN
+      DO;
+      cch = FINDB(@sbSpec.rgch(ich), '}', sbSpec.cch - ich) + 1;
+      IF cch = 0 OR cch > 14 THEN
+         GOTO Fail;
+      IF NotNil(psbNode) THEN
+         CALL AppendRgch(@sbNode, @sbSpec.rgch(ich + 1), cch - 2);
+      ich = ich + cch;
+      END;
+   ELSE
+      DO;
+      IF ich <> 0 THEN
+         GOTO Fail;
+      IF NotNil(psbNode) THEN
+         CALL AppendSb(@sbNode, @ucb.defaultNode);
+      END;
+   IF sbSpec.rgch(ich) = '[' THEN
+      DO;
+      cch = FINDB(@sbSpec.rgch(ich), ']', sbSpec.cch - ich) + 1;
+      IF cch = 0 OR cch > 14 THEN
+         GOTO Fail;
+      IF NotNil(psbVol) THEN
+         CALL AppendRgch(@sbVol, @sbSpec.rgch(ich + 1), cch - 2);
+      ich = ich + cch;
+      END;
+   ELSE
+      DO;
+      IF ich <> 0 THEN
+         GOTO Fail;
+      IF NotNil(psbVol) THEN
+         CALL AppendSb(@sbVol, @ucb.defaultVol);
+      END;
+   IF sbSpec.rgch(ich) = '<' THEN
+      DO;
+      cch = FINDB(@sbSpec.rgch(ich), '>', sbSpec.cch - ich) + 1;
+      IF cch = 0 OR cch > 14 THEN
+         GOTO Fail;
+      IF NotNil(psbDir) THEN
+         CALL AppendRgch(@sbDir, @sbSpec.rgch(ich + 1), cch - 2);
+      ich = ich + cch;
+      END;
+   ELSE
+      DO;
+      IF ich <> 0 THEN
+         GOTO Fail;
+      IF NotNil(psbDir) THEN
+         CALL AppendSb(@sbDir, @ucb.defaultDir);
+      END;
+   IF NotNil(psbFile) THEN
+      DO;
+      IF ich = 0 AND ucb.prefix(0) <> 0 THEN
+         CALL AppendSb(@sbFile, @ucb.prefix);
+      CALL AppendRgch(@sbFile, @sbSpec.rgch(ich), sbSpec.cch - ich);
+      END;
+   RETURN TRUE;
+Fail:
+   IF NotNil(psbFile) THEN
+      CALL AppendRgch(@sbFile, @sbSpec.rgch(ich), sbSpec.cch - ich);
+   RETURN FALSE;
+END ParseFileSpec;
+
+
+FPrefixSb: PROCEDURE (psb, psbPrefix) BYTE PUBLIC REENTRANT;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   DECLARE psbPrefix POINTER, sbPrefix BASED psbPrefix SbType;
+   IF sb.cch >= sbPrefix.cch THEN
+      RETURN FEqRgch(@sb.rgch, @sbPrefix.rgch, sbPrefix.cch);
+   ELSE
+      RETURN FALSE;
+END FPrefixSb;
+
+
+/* unsigned decimal to DWORD (no overflow check) */
+FDwFromRgch: PROCEDURE (odw, prgch, cch) BYTE PUBLIC REENTRANT;
+   DECLARE odw WORD, dw BASED odw DWORD;
+   DECLARE prgch POINTER, rgch BASED prgch (1) BYTE;
+   DECLARE cch WORD;
+   DECLARE ich WORD;
+   DECLARE ch BYTE;
+   IF cch = 0 THEN
+      RETURN FALSE;
+   dw = 0;
+   ich = 0;
+   DO WHILE ich < cch;
+      ch = rgch(ich);
+      IF ch < '0' OR ch > '9' THEN
+         RETURN FALSE;
+      dw = dw * 10 + ch - '0';
+      ich = ich + 1;
+   END;
+   RETURN TRUE;
+END FDwFromRgch;
+
+
+FDwFromSb: PROCEDURE (odw, psb) BYTE PUBLIC REENTRANT;
+   DECLARE odw WORD, dw BASED odw DWORD;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   RETURN FDwFromRgch(.dw, @sb.rgch, sb.cch);
+END FDwFromSb;
+
+
+FSuffixSb: PROCEDURE (psb, psbSuffix) BYTE PUBLIC REENTRANT;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   DECLARE psbSuffix POINTER, sbSuffix BASED psbSuffix SbType;
+   IF sb.cch >= sbSuffix.cch THEN
+      RETURN FEqRgch(@sb.rgch(sb.cch - sbSuffix.cch), @sbSuffix.rgch,
+        sbSuffix.cch);
+   ELSE
+      RETURN FALSE;
+END FSuffixSb;
+
+
+/* "int.frac", "int<06h>" (1/2) or "int<10h>" (1/4): wInt and the fraction
+   wFrac in units of 1/10000h */
+FFixedFromRgch: PROCEDURE (owInt, owFrac, prgch, cch) BYTE PUBLIC REENTRANT;
+   DECLARE owInt WORD, wInt BASED owInt WORD;
+   DECLARE owFrac WORD, wFrac BASED owFrac WORD;
+   DECLARE prgch POINTER, rgch BASED prgch (1) BYTE;
+   DECLARE cch WORD;
+   DECLARE ichDot WORD;
+   DECLARE ichFrac WORD;
+   DECLARE cchFrac WORD;
+   IF cch = 0 THEN
+      RETURN FALSE;
+   ichDot = FINDB(@rgch, '.', cch);
+   IF ichDot = 0FFFFH THEN
+      DO;
+      IF rgch(cch - 1) = 6 THEN
+         DO;
+         ichDot = cch - 1;
+         wFrac = 8000H;
+         END;
+      ELSE IF rgch(cch - 1) = 10H THEN
+         DO;
+         ichDot = cch - 1;
+         wFrac = 4000H;
+         END;
+      ELSE
+         DO;
+         ichDot = cch;
+         wFrac = 0;
+         END;
+      END;
+   ELSE IF ichDot + 1 = cch THEN
+      DO;
+      IF ichDot = 0 THEN
+         RETURN FALSE;
+      wFrac = 0;
+      END;
+   ELSE
+      DO;
+      ichFrac = ichDot + 1;
+      cchFrac = cch - ichFrac;
+      IF NOT FWFromRgch(.wFrac, @rgch(ichFrac), cchFrac) THEN
+         RETURN FALSE;
+      IF cchFrac >= 5 THEN
+         RETURN FALSE;
+      wFrac = FracDiv(wFrac, rgwPow10(cchFrac));
+      END;
+   IF ichDot = 0 THEN
+      wInt = 0;
+   ELSE IF NOT FWFromRgch(.wInt, @rgch, ichDot) THEN
+      RETURN FALSE;
+   RETURN TRUE;
+END FFixedFromRgch;
+
+
+FFixedFromSb: PROCEDURE (owInt, owFrac, psb) BYTE PUBLIC REENTRANT;
+   DECLARE owInt WORD, wInt BASED owInt WORD;
+   DECLARE owFrac WORD, wFrac BASED owFrac WORD;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   RETURN FFixedFromRgch(.wInt, .wFrac, @sb.rgch, sb.cch);
+END FFixedFromSb;
+
+
+FWFromRgch: PROCEDURE (ow, prgch, cch) BYTE PUBLIC REENTRANT;
+   DECLARE ow WORD, w BASED ow WORD;
+   DECLARE prgch POINTER, rgch BASED prgch (1) BYTE;
+   DECLARE cch WORD;
+   DECLARE dw DWORD, awDw (2) WORD AT (@dw);
+   IF NOT FDwFromRgch(.dw, @rgch, cch) THEN
+      RETURN FALSE;
+   IF awDw(1) <> 0 THEN
+      RETURN FALSE;
+   w = dw;
+   RETURN TRUE;
+END FWFromRgch;
+
+
+FWFromSb: PROCEDURE (ow, psb) BYTE PUBLIC REENTRANT;
+   DECLARE ow WORD, w BASED ow WORD;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   RETURN FWFromRgch(.w, @sb.rgch, sb.cch);
+END FWFromSb;
+
+
+/* insert sbSrc into sbDst at ich (truncating at 255) */
+InsertSb: PROCEDURE (psbDst, ich, psbSrc) PUBLIC REENTRANT;
+   DECLARE psbDst POINTER, sbDst BASED psbDst SbType;
+   DECLARE ich WORD;
+   DECLARE psbSrc POINTER, sbSrc BASED psbSrc SbType;
+   DECLARE cchIns WORD;
+   DECLARE cchTail WORD;
+   DECLARE cchMax WORD;
+   IF sbDst.cch < ich THEN
+      ich = sbDst.cch;
+   cchIns = sbSrc.cch;
+   cchTail = sbDst.cch - ich;
+   cchMax = LENGTH(sbDst.rgch) - ich;
+   IF cchTail + cchIns > cchMax THEN
+      DO;
+      IF cchIns > cchMax THEN
+         cchIns = cchMax;
+      cchTail = cchMax - cchIns;
+      END;
+   CALL MOVRB(@sbDst.rgch(ich), @sbDst.rgch(ich + cchIns), cchTail);
+   CALL MOVB(@sbSrc.rgch, @sbDst.rgch(ich), cchIns);
+   sbDst.cch = ich + cchIns + cchTail;
+END InsertSb;
+
+
+/* compare via rgbCollate: 0 = less, 1 = equal, 2 = greater */
+CompareRgch: PROCEDURE (prgch1, cch1, prgch2, cch2) BYTE PUBLIC REENTRANT;
+   DECLARE prgch1 POINTER, rgch1 BASED prgch1 (1) BYTE;
+   DECLARE cch1 WORD;
+   DECLARE prgch2 POINTER, rgch2 BASED prgch2 (1) BYTE;
+   DECLARE cch2 WORD;
+   DECLARE ich WORD;
+   DECLARE ch1 BYTE;
+   DECLARE ch2 BYTE;
+   ich = 0;
+   DO WHILE ich < cch1;
+      IF ich >= cch2 THEN
+         RETURN 2;
+      ch1 = rgbCollate(rgch1(ich));
+      ch2 = rgbCollate(rgch2(ich));
+      IF ch1 < ch2 THEN
+         RETURN 0;
+      IF ch1 > ch2 THEN
+         RETURN 2;
+      ich = ich + 1;
+   END;
+   IF cch1 = cch2 THEN
+      RETURN 1;
+   RETURN 0;
+END CompareRgch;
+
+
+CompareSb: PROCEDURE (psb1, psb2) BYTE PUBLIC REENTRANT;
+   DECLARE psb1 POINTER, sb1 BASED psb1 SbType;
+   DECLARE psb2 POINTER, sb2 BASED psb2 SbType;
+   RETURN CompareRgch(@sb1.rgch, sb1.cch, @sb2.rgch, sb2.cch);
+END CompareSb;
+
+
+SbFromInt: PROCEDURE (psb, int, cch) PUBLIC REENTRANT;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   DECLARE int INTEGER, cch WORD;
+   DECLARE fNeg BYTE;
+   IF int >= 0 THEN
+      fNeg = FALSE;
+   ELSE
+      DO;
+      int = -int;
+      fNeg = TRUE;
+      END;
+   CALL SbFromNumberA(@sb, UNSIGN(int), cch, ' ', fNeg);
+END SbFromInt;
+
+
+/* decimal, right aligned in at least cch chars, filled with chFill */
+SbFromNumber: PROCEDURE (psb, q, cch, chFill) PUBLIC REENTRANT;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   DECLARE q DWORD, cch WORD, chFill BYTE;
+   CALL SbFromNumberA(@sb, q, cch, chFill, FALSE);
+END SbFromNumber;
+
+
+SbFromW: PROCEDURE (psb, w) PUBLIC REENTRANT;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   DECLARE w WORD;
+   CALL SbFromNumber(@sb, w, 1, ' ');
+END SbFromW;
+
+
+/* wInt.frac with cDec decimals (max 4 significant, rest '0') */
+SbFromFixed: PROCEDURE (psb, wInt, wFrac, cchInt, cDec, chFill) PUBLIC REENTRANT;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   DECLARE wInt WORD, wFrac WORD, cchInt WORD, cDec WORD, chFill BYTE;
+   DECLARE cDecSig WORD;
+   DECLARE wDec WORD;
+   DECLARE sbTemp SbType;
+   IF cDec < 5 THEN
+      cDecSig = cDec;
+   ELSE
+      cDecSig = 4;
+   wDec = FracMul(rgwPow10(cDecSig), wFrac);
+   IF rgwPow10(cDecSig) = wDec THEN
+      DO;
+      wDec = 0;
+      wInt = wInt + 1;
+      END;
+   sb.cch = 0;
+   IF wInt <> 0 OR cchInt <> 0 THEN
+      DO;
+      CALL SbFromNumber(@sbTemp, wInt, cchInt, chFill);
+      CALL AppendSb(@sb, @sbTemp);
+      END;
+   IF wDec <> 0 OR cDec <> 0 THEN
+      DO;
+      CALL AppendCh(@sb, '.');
+      CALL SbFromNumber(@sbTemp, wDec, cDecSig, '0');
+      CALL AppendSb(@sb, @sbTemp);
+      DO WHILE cDec > cDecSig;
+         CALL AppendCh(@sb, '0');
+         cDecSig = cDecSig + 1;
+      END;
+      END;
+END SbFromFixed;
+
+
+/* 4 hex digits followed by 'h' */
+SbHexFromW: PROCEDURE (psb, w) PUBLIC REENTRANT;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   DECLARE w WORD;
+   DECLARE i WORD;
+   i = 0;
+   DO WHILE i < 4;
+      w = ROL(w, 4);
+      sb.rgch(i) = rgchHex(w AND 0FH);
+      i = i + 1;
+   END;
+   sb.rgch(i) = 'h';
+   i = i + 1;
+   sb.cch = i;
+END SbHexFromW;
+
+
+SbRomanFromW: PROCEDURE (psb, w) PUBLIC REENTRANT;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   DECLARE w WORD;
+   DECLARE rgchRoman   (*) BYTE DATA ('iviiixlxxxcdcccmVmmmXLXXX');   /* 109D */
+   DECLARE mpichdich   (5) BYTE DATA (20, 15, 10, 5, 0);               /* 10B6 */
+   DECLARE mpdigitich (10) BYTE DATA (2, 2, 2, 2, 0, 1, 1, 1, 1, 4);   /* 10BB */
+   DECLARE mpdigitcch (10) BYTE DATA (0, 1, 2, 3, 2, 1, 2, 3, 4, 2);   /* 10C5 */
+   DECLARE ichDecimal WORD;
+   DECLARE ichRoman WORD;
+   DECLARE cchRoman WORD;
+   DECLARE sbDecimal STRUCTURE (cch BYTE, rgch (12) BYTE);
+   DECLARE digit BYTE;
+   /* expand w as a 5-digit decimal string */
+   CALL SbFromNumber(@sbDecimal, w, 5, '0');
+   /* enumerate digits, appending roman equivalent to sb */
+   sb.cch = 0;
+   ichDecimal = 0;
+   DO WHILE ichDecimal < sbDecimal.cch;
+      digit = sbDecimal.rgch(ichDecimal) - '0';
+      ichRoman = mpdigitich(digit) + mpichdich(ichDecimal);
+      cchRoman = mpdigitcch(digit);
+      CALL AppendRgch(@sb, @rgchRoman(ichRoman), cchRoman);
+      ichDecimal = ichDecimal + 1;
+   END;
+END SbRomanFromW;
+
+
+/* split sbSrc at the first ch: sbFirst (trailing blanks trimmed) and
+   sbRest (leading blanks trimmed) */
+SplitSb: PROCEDURE (psbFirst, ch, psbRest, psbSrc) PUBLIC REENTRANT;
+   DECLARE psbFirst POINTER, sbFirst BASED psbFirst SbType;
+   DECLARE ch BYTE;
+   DECLARE psbRest POINTER, sbRest BASED psbRest SbType;
+   DECLARE psbSrc POINTER, sbSrc BASED psbSrc SbType;
+   DECLARE ich WORD;
+   ich = FINDB(@sbSrc.rgch, ch, sbSrc.cch);
+   IF ich = 0FFFFH THEN
+      ich = sbSrc.cch;
+   sbFirst.cch = ich;
+   CALL MOVB(@sbSrc.rgch, @sbFirst.rgch, sbFirst.cch);
+   CALL TrimSb(@sbFirst, FALSE, TRUE);
+   IF sbSrc.cch > ich THEN
+      DO;
+      sbRest.cch = sbSrc.cch - (ich + 1);
+      CALL MOVB(@sbSrc.rgch(ich + 1), @sbRest.rgch, sbRest.cch);
+      CALL TrimSb(@sbRest, TRUE, FALSE);
+      END;
+   ELSE
+      sbRest.cch = 0;
+END SplitSb;
+
+
+/* strip leading and/or trailing blanks */
+TrimSb: PROCEDURE (psb, fLeading, fTrailing) PUBLIC REENTRANT;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   DECLARE fLeading BYTE, fTrailing BYTE;
+   DECLARE ich WORD;
+   IF fLeading THEN
+      DO;
+      ich = SKIPB(@sb.rgch, ' ', sb.cch);
+      IF ich = 0FFFFH THEN
+         sb.cch = 0;
+      ELSE IF ich <> 0 THEN
+         DO;
+         sb.cch = sb.cch - ich;
+         CALL MOVB(@sb.rgch(ich), @sb.rgch, sb.cch);
+         END;
+      END;
+   IF fTrailing THEN
+      sb.cch = SKIPRB(@sb.rgch, ' ', sb.cch) + 1;
+END TrimSb;
+
+
+SbFromNumberA: PROCEDURE (psb, q, cch, chFill, fNeg) PUBLIC REENTRANT;
+   DECLARE psb POINTER, sb BASED psb SbType;
+   DECLARE q DWORD, cch WORD, chFill BYTE, fNeg BYTE;
+   DECLARE ichFirst WORD;
+   DECLARE ich WORD;
+   DECLARE rgch (255) BYTE;
+   ichFirst = LENGTH(rgch) - cch;
+   ich = LENGTH(rgch);
+   DO WHILE q <> 0 OR ich = LENGTH(rgch);
+      ich = ich - 1;
+      rgch(ich) = '0' + q MOD 10;
+      q = q / 10;
+   END;
+   IF fNeg THEN
+      DO;
+      ich = ich - 1;
+      rgch(ich) = '-';
+      END;
+   DO WHILE ich > ichFirst;
+      ich = ich - 1;
+      rgch(ich) = chFill;
+   END;
+   sb.cch = 0;
+   CALL AppendRgch(@sb, @rgch(ich), LENGTH(rgch) - ich);
+END SbFromNumberA;
+
+END Strings;

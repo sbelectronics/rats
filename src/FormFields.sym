@@ -1,0 +1,5 @@
+# FormFields private symbols: NAME FRAME OFFSET (hex)
+COPYSB 5cd 16a
+FDWFROMSB 5cd 7b0
+SBFROMNUMBER 5cd af4
+TRIMSB 5cd da2

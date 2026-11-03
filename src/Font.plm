@@ -1,0 +1,51 @@
+$MEDIUM OPTIMIZE(2)
+Font: DO;
+/* Font loading (image 0x552E, frame 0552h; CONST = DGROUP 0C7Eh).
+   LoadFont(psb)          psb = offset of a length-prefixed file name.
+   LoadFontFile(pb, cb)   opens the font file (mode read), allocates a
+                          2200h-byte buffer, blanks the screen
+                          (SetScreenVidAttr(1,0)), loads the font into the
+                          character-generator RAM with LoadFontRam, turns
+                          the screen back on and frees buffer and file.
+   LoadSysFont            loads the default [sys]<sys>Sys.font. */
+
+DECLARE sFontBuf LITERALLY '2200H';
+
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+OpenFile: PROCEDURE (pFhRet, pbFileSpec, cbFileSpec, pbPassword, cbPassword,
+      mode) WORD EXTERNAL;
+   DECLARE pFhRet POINTER, pbFileSpec POINTER, cbFileSpec WORD,
+      pbPassword POINTER, cbPassword WORD, mode WORD; END;
+CloseFile: PROCEDURE (fh) WORD EXTERNAL; DECLARE fh WORD; END;
+AllocSegmentLL: PROCEDURE (cb, ppSegRet) WORD EXTERNAL;
+   DECLARE cb WORD, ppSegRet POINTER; END;
+DeallocSegmentLL: PROCEDURE (pSeg, cb) WORD EXTERNAL;
+   DECLARE pSeg POINTER, cb WORD; END;
+SetScreenVidAttr: PROCEDURE (iAttr, fOn) WORD EXTERNAL;
+   DECLARE (iAttr, fOn) WORD; END;
+LoadFontRam: PROCEDURE (fh, pBuffer, sBuffer) WORD EXTERNAL;
+   DECLARE fh WORD, pBuffer POINTER, sBuffer WORD; END;
+
+LoadFont: PROCEDURE (psb) PUBLIC REENTRANT;
+   DECLARE psb WORD;
+   DECLARE sb BASED psb (1) BYTE;
+   CALL LoadFontFile(@sb(1), sb(0));
+END LoadFont;
+
+LoadFontFile: PROCEDURE (pb, cb) PUBLIC REENTRANT;
+   DECLARE pb POINTER, cb WORD;
+   DECLARE pBuf POINTER;
+   DECLARE fh WORD;
+   CALL CheckErc(OpenFile(@fh, pb, cb, 0, 0, 'mr'));
+   CALL CheckErc(AllocSegmentLL(sFontBuf, @pBuf));
+   CALL CheckErc(SetScreenVidAttr(1, 0));
+   CALL CheckErc(LoadFontRam(fh, pBuf, sFontBuf));
+   CALL CheckErc(SetScreenVidAttr(1, 0FFH));
+   CALL CheckErc(DeallocSegmentLL(pBuf, sFontBuf));
+   CALL CheckErc(CloseFile(fh));
+END LoadFontFile;
+
+LoadSysFont: PROCEDURE PUBLIC REENTRANT;
+   CALL LoadFont(.(18, '[sys]<sys>Sys.font'));
+END LoadSysFont;
+END Font;

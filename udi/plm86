@@ -1,0 +1,6 @@
+#!/bin/sh
+# PL/M-86 V2.3 under emulation (see udi/README.md).
+# Uses the repo's venv/ if there is one, else python3 (needs the unicorn package).
+H=$(cd "$(dirname "$0")" && pwd)
+PY=$H/../venv/bin/python; [ -x "$PY" ] || PY=python3
+exec "$PY" "$H/plm86.py" "$@"

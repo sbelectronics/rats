@@ -1,0 +1,35 @@
+$MEDIUM OPTIMIZE(2)
+Mod35AC: DO;
+/* HwBeep: sound the workstation beeper, hardware-dependent.
+   GetVidType (6BB4) classifies the processor type from the system
+   structure: class 0 -> beeper bit at I/O port 44h (BeepPort44),
+   class 1 -> bits 1..2 of the control port 0FA82h (BeepPortFA82).
+   The duration is a busy-wait count. */
+
+GetVidType: PROCEDURE BYTE EXTERNAL; END;
+
+HwBeep: PROCEDURE PUBLIC;
+   DO CASE GetVidType;
+      CALL BeepPort44(2000);
+      CALL BeepPortFA82(3000);
+   END;
+END HwBeep;
+
+BeepPort44: PROCEDURE (cnt) PUBLIC;
+   DECLARE cnt WORD;
+   OUTPUT(44H) = 40H;
+   DO WHILE cnt <> 0;
+      cnt = cnt - 1;
+   END;
+   OUTPUT(44H) = 0;
+END BeepPort44;
+
+BeepPortFA82: PROCEDURE (cnt) PUBLIC;
+   DECLARE cnt WORD;
+   OUTPUT(0FA82H) = (INPUT(0FA82H) AND 0F9H) OR 2;
+   DO WHILE cnt <> 0;
+      cnt = cnt - 1;
+   END;
+   OUTPUT(0FA82H) = INPUT(0FA82H) AND 0F9H;
+END BeepPortFA82;
+END Mod35AC;

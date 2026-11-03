@@ -1,0 +1,173 @@
+$MEDIUM OPTIMIZE(2)
+/* VidInit: video initialisation and screen helpers (image 6C0E-6F28).
+   VidInit(pFrames, cFrames, fWide, fReverse)
+              pFrames = 0FFFFh: keep the current screen setup (only read
+              columns/lines from the video configuration); otherwise
+              ResetVideo to 132 (fWide) or 80 columns and the driver's
+              line count, define cFrames frames from 4-byte descriptors
+              (col, row, cCols, cRows; values >= 80h are negative
+              (byte + 0FF00h), i.e. relative to the right/bottom edge;
+              cCols/cRows 0 = full width/height),
+              InitVidMap, optional reverse video.  Then fetch the
+              GetPStructure(7) pointers and install the 8 driver entry
+              points of the selected asm driver (GetVidType) in rgpVid.
+   ClearRect(col, row, cCols, cRows)       fill the rectangle with 0
+   ScrollRect(col, row, cCols, cRows, fUp) scroll the rectangle one line
+              up (fUp) or down and clear the vacated line
+   GetVidBlock(pDst, i) / PutVidBlock(pSrc, i)  copy cbVidBlock bytes
+              from/to the i-th area of the GetPStructure(7) table
+   CONST = DGROUP 10E6-1129, DATA = DGROUP 2F12-2F45.                  */
+VidInit: DO;
+
+/* ---- driver tables (CONST DGROUP 10E6.., in data module VidTab.asm, which the
+        linker placed between VidSel and VidInit) ---- */
+DECLARE rgwLines (2) WORD EXTERNAL,      /* 10E6: screen lines for driver type 0/1 (34, 29) */
+        /* entry i of driver t at index 2*i + t (VidA0..7 at 6F80, VidB0..7 at 7200) */
+        rgpDrv (16) POINTER EXTERNAL;    /* 10EA */
+
+/* ---- DATA (DGROUP 2F12..) ---- */
+DECLARE cbVidBlock WORD PUBLIC,        /* 2F12 */
+        sMap WORD,                     /* 2F14 */
+        wVid16 WORD PUBLIC,            /* 2F16 */
+        wVid18 WORD PUBLIC,            /* 2F18 */
+        pVidBlocks POINTER PUBLIC,     /* 2F1A GetPStructure(7) */
+        pVidCfg POINTER PUBLIC,        /* 2F1E GetPStructure(2) */
+        cScrCols WORD PUBLIC,          /* 2F22 */
+        cScrLines WORD PUBLIC,         /* 2F24 */
+        rgpVid (8) POINTER PUBLIC;     /* 2F26 driver entry points */
+
+DECLARE vidCfg BASED pVidCfg STRUCTURE (b (8) BYTE, wMode WORD, bA BYTE,
+           cCols BYTE, cLines BYTE, bD BYTE, bE BYTE, bF BYTE),
+        apVidBlock BASED pVidBlocks (1) POINTER;
+
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+GetVidType: PROCEDURE BYTE EXTERNAL; END;
+VidReadCells: PROCEDURE (pb, col, row, cnt) EXTERNAL;
+   DECLARE pb POINTER, (col, row, cnt) WORD; END;
+VidFillCells: PROCEDURE (col, row, cnt, ch) EXTERNAL;
+   DECLARE (col, row, cnt, ch) WORD; END;
+VidPutCells: PROCEDURE (col, row, cnt, pb) EXTERNAL;
+   DECLARE (col, row, cnt) WORD, pb POINTER; END;
+GetPStructure: PROCEDURE (structCode, ph, ppStructRet) WORD EXTERNAL;
+   DECLARE (structCode, ph) WORD, ppStructRet POINTER; END;
+ResetVideo: PROCEDURE (nCols, nLines, fAttr, bSpace, psMapRet) WORD EXTERNAL;
+   DECLARE (nCols, nLines, fAttr, bSpace) WORD, psMapRet POINTER; END;
+InitVidFrame: PROCEDURE (iFrame, iColStart, iLineStart, nCols, nLines,
+      borderDesc, bBorderChar, bBorderAttr, fDblHigh, fDblWide) WORD EXTERNAL;
+   DECLARE (iFrame, iColStart, iLineStart, nCols, nLines, borderDesc,
+      bBorderChar, bBorderAttr, fDblHigh, fDblWide) WORD; END;
+InitVidMap: PROCEDURE (pMap, sMap) WORD EXTERNAL;
+   DECLARE pMap POINTER, sMap WORD; END;
+SetScreenVidAttr: PROCEDURE (iAttr, fOn) WORD EXTERNAL;
+   DECLARE (iAttr, fOn) WORD; END;
+
+VidInit: PROCEDURE (pFrames, cFrames, fWide, fReverse) PUBLIC REENTRANT;
+   DECLARE (pFrames, cFrames) WORD, (fWide, fReverse) BYTE;
+   DECLARE frame BASED pFrames (1) STRUCTURE (col BYTE, row BYTE,
+              cCols BYTE, cLines BYTE);
+   DECLARE i WORD;
+   DECLARE iFrame WORD;
+   DECLARE pFrame WORD, fr BASED pFrame STRUCTURE (col BYTE, row BYTE,
+              cCols BYTE, cLines BYTE);
+   DECLARE col WORD;
+   DECLARE row WORD;
+   DECLARE cCols WORD;
+   DECLARE cLines WORD;
+   DECLARE bType BYTE;
+   bType = GetVidType;
+   CALL CheckErc(GetPStructure(2, 0, @pVidCfg));
+   IF pFrames = 0FFFFH THEN DO;
+      sMap = vidCfg.wMode;
+      cScrCols = vidCfg.cCols;
+      cScrLines = vidCfg.cLines;
+   END;
+   ELSE DO;
+      IF fWide THEN
+         cScrCols = 132;
+      ELSE
+         cScrCols = 80;
+      cScrLines = rgwLines(bType);
+      CALL CheckErc(ResetVideo(cScrCols, cScrLines, 0FFH, 0, @sMap));
+      iFrame = 0;
+      DO WHILE iFrame < cFrames;
+         pFrame = .frame(iFrame);
+         IF fr.col < 80H THEN
+            col = fr.col;
+         ELSE
+            col = fr.col + cScrCols + 0FF00H;
+         IF fr.row < 80H THEN
+            row = fr.row;
+         ELSE
+            row = fr.row + cScrLines + 0FF00H;
+         IF fr.cCols = 0 THEN
+            cCols = cScrCols;
+         ELSE IF fr.cCols < 80H THEN
+            cCols = fr.cCols;
+         ELSE
+            cCols = fr.cCols + cScrCols + 0FF00H;
+         IF fr.cLines = 0 THEN
+            cLines = cScrLines;
+         ELSE IF fr.cLines < 80H THEN
+            cLines = fr.cLines;
+         ELSE
+            cLines = fr.cLines + cScrLines + 0FF00H;
+         CALL CheckErc(InitVidFrame(iFrame, col, row, cCols, cLines,
+                                    0, 0, 0, 0, 0));
+         iFrame = iFrame + 1;
+      END;
+      CALL CheckErc(InitVidMap(0, sMap));
+      IF fReverse THEN
+         CALL CheckErc(SetScreenVidAttr(1, 0FFH));
+   END;
+   cbVidBlock = vidCfg.bD;
+   wVid16 = vidCfg.bE;
+   wVid18 = vidCfg.bF;
+   CALL CheckErc(GetPStructure(7, 0, @pVidBlocks));
+   i = 0;
+   DO WHILE i < 8;
+      rgpVid(i) = rgpDrv(SHL(i, 1) + bType);
+      i = i + 1;
+   END;
+END VidInit;
+
+ClearRect: PROCEDURE (col, row, cCols, cLines) PUBLIC REENTRANT;
+   DECLARE (col, row, cCols, cLines) WORD;
+   DO WHILE cLines <> 0;
+      CALL VidFillCells(col, row, cCols, 0);
+      row = row + 1;
+      cLines = cLines - 1;
+   END;
+END ClearRect;
+
+ScrollRect: PROCEDURE (col, row, cCols, cLines, fUp) PUBLIC REENTRANT;
+   DECLARE (col, row, cCols, cLines) WORD, fUp BYTE;
+   DECLARE rowEnd WORD;
+   DECLARE rgbLine (264) BYTE;
+   rowEnd = row + cLines;
+   IF fUp THEN
+      DO WHILE row + 1 < rowEnd;
+         CALL VidReadCells(@rgbLine, col, row + 1, cCols);
+         CALL VidPutCells(col, row, cCols, @rgbLine);
+         row = row + 1;
+      END;
+   ELSE
+      DO WHILE row + 1 < rowEnd;
+         rowEnd = rowEnd - 1;
+         CALL VidReadCells(@rgbLine, col, rowEnd - 1, cCols);
+         CALL VidPutCells(col, rowEnd, cCols, @rgbLine);
+      END;
+   IF row < rowEnd THEN
+      CALL VidFillCells(col, row, cCols, 0);
+END ScrollRect;
+
+GetVidBlock: PROCEDURE (pDst, i) PUBLIC REENTRANT;
+   DECLARE (pDst, i) WORD, abDst BASED pDst (1) BYTE;
+   CALL MOVB(apVidBlock(i), @abDst, cbVidBlock);
+END GetVidBlock;
+
+PutVidBlock: PROCEDURE (pSrc, i) PUBLIC REENTRANT;
+   DECLARE (pSrc, i) WORD, abSrc BASED pSrc (1) BYTE;
+   CALL MOVB(@abSrc, apVidBlock(i), cbVidBlock);
+END PutVidBlock;
+
+END VidInit;

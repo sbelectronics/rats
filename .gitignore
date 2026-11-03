@@ -1,0 +1,47 @@
+# Python virtualenv (recreate: python3 -m venv venv && venv/bin/pip install unicorn capstone)
+venv/
+__pycache__/
+*.pyc
+
+# The Intel PL/M-86 compiler and ASM86 assembler are Intel's software and are not redistributed.
+# tools/getorig.sh copies them into orig/ from a CTOS disk copy.
+orig/*.86
+
+# Scratch space and build output (objects, listings, the relinked work/Rats.run, old experiments).
+# Keep only the small name tables that tools/rdis2.py reads.
+work/*
+!work/names.txt
+!work/rqnames.txt
+!work/ossub.txt
+
+# Compiler / assembler output wherever it lands, and the emulator's temporary work dirs
+*.obj
+*.OBJ
+*.lst
+*.LST
+*.out
+.udi86_work_*/
+
+# Reverse-engineering material for udi/: disassemblies of Convergent binaries, test scratch,
+# and compiler listings of Convergent sources
+udi/analysis/
+udi/test/
+udi/examples/
+
+# Go port build output, screenshots, local high-score files
+*.exe
+*.test
+go/*.png
+*.scores
+
+# Editor and OS clutter
+*.matched
+*.bak
+*.swp
+*~
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db
+desktop.ini

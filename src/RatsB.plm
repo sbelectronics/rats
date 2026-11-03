@@ -1,0 +1,1066 @@
+$MEDIUM OPTIMIZE(2)
+/* RatsB - object behaviours (image 0908-1DF7, frame 0090).  Byte-exact.
+   Object types (ObjType.type), handlers via rgpHandler (DGROUP 0018h):
+     0 player   (2x2, NewPlayer, PlayerTick)
+     1 rat nest (2x2, NewNest,   NestTick)  spawns young rats
+     2 young rat(1x2, NewYoung,  YoungTick) grows into type 3
+     3 rat      (2x2,            RatTick)
+     4 small rat(1x1, NewRat,    RatTick)   released by a dying pregnant rat
+     5 shot     (1x1, NewShot,   ShotTick)
+     6 dying obj(NewGhost, GhostTick) explodes into type 7, may respawn
+     7 blast fragment (1x1, NewBlast, BlastTick)
+   Object fields as used here: delay = ticks between moves, ctr = tick
+   counter (animation; odd/even halves vertical speed), size = cells (1,2,4),
+   dir = heading 0..7 (N,NE,E,SE,S,SW,W,NW; 8 = none), flags: 01 autopilot,
+   08 handedness (turn/shot side), 10 pregnant / bonus, 20 drawn, 40 moving;
+   b9 = obstacle-avoidance turn count (Turn) or blast spread kind;
+   wA = shot reload counter (player) / spawned value (nest) / shoot
+   probability (rats) / respawn kind (dying); wC = value (score);
+   wE = owner (nest of a rat, shooter of a shot).
+   Positions are WORDs: low byte x, high byte y; map(pos) = cell char. */
+RatsB: DO;
+
+DECLARE FOREVER LITERALLY 'WHILE 1',
+        TRUE LITERALLY '0FFH', FALSE LITERALLY '0';
+
+DECLARE ObjType LITERALLY 'STRUCTURE (link WORD, delay BYTE, ctr BYTE,
+        type BYTE, size BYTE, b6 BYTE, dir BYTE, flags BYTE, b9 BYTE,
+        wA WORD, wC WORD, wE WORD)';
+
+/* ---- externals: module A ---- */
+NewObj: PROCEDURE (pTmpl, pos, delay) WORD EXTERNAL;
+   DECLARE (pTmpl, pos) WORD, delay BYTE; END;
+FreeObj: PROCEDURE (pDest, p) EXTERNAL; DECLARE (pDest, p) WORD; END;
+KillObj: PROCEDURE (p) EXTERNAL; DECLARE p WORD; END;
+MoveCur: PROCEDURE (pos) EXTERNAL; DECLARE pos WORD; END;
+FindObjAt: PROCEDURE (pos) WORD EXTERNAL; DECLARE pos WORD; END;
+RandomCell: PROCEDURE WORD EXTERNAL; END;
+IsFree: PROCEDURE (pos, size) BYTE EXTERNAL; DECLARE pos WORD, size BYTE; END;
+/* ---- externals: module C ---- */
+UpdateStatus: PROCEDURE EXTERNAL; END;
+/* ---- externals: libraries ---- */
+Random: PROCEDURE (n) WORD EXTERNAL; DECLARE n WORD; END;
+
+/* ---- externals: data ---- */
+DECLARE
+   wShotReload WORD EXTERNAL,            /* 00EA (module C) */
+   /* 20x16 tables indexed by DirIndex: low 3 bits = heading to steer,
+      high nibble = direction to fire (8 = don't) */
+   rgbSeekPlayer (320) BYTE EXTERNAL,    /* 0298 autopilot player -> target */
+   rgbSeek3 (320) BYTE EXTERNAL,         /* 03D8 rat -> player */
+   rgbSeek4 (320) BYTE EXTERNAL,         /* 0518 small rat -> player */
+   rgpDraw (5) POINTER EXTERNAL,         /* 0658 */
+   fCrazyRats BYTE EXTERNAL,               /* orphan rats roam and shoot */
+   wViewW WORD EXTERNAL,                 /* 134C */
+   wViewH WORD EXTERNAL,                 /* 134E */
+   pMap POINTER EXTERNAL,                /* 1352 */
+   map BASED pMap (1) BYTE,
+   bViewX BYTE EXTERNAL,                 /* 1358 */
+   bViewY BYTE EXTERNAL,                 /* 1359 */
+   rgObj (256) ObjType EXTERNAL,         /* 135A */
+   rgPos (1024) WORD EXTERNAL,           /* 235A */
+   pPlayer WORD EXTERNAL,                /* 2B9E */
+   posPlayer WORD EXTERNAL,              /* 2BA0 */
+   cRatsLeft WORD EXTERNAL,                /* rats (types 2,3) alive */
+   cCrazyLeft WORD EXTERNAL,                /* small rats (type 4) alive */
+   cFactLeft WORD EXTERNAL,                /* nests alive */
+   cLives WORD EXTERNAL,                /* lives (players) left */
+   wDifficulty WORD EXTERNAL,            /* 2BB6: rat speed/value level */
+   wFactValue WORD EXTERNAL,                  /* nest capacity / value */
+   wKeysHeld WORD EXTERNAL,              /* 2BBA: command bits held */
+   wKeysHit WORD EXTERNAL,               /* 2BBC: pressed since last tick */
+   wKeysUp WORD EXTERNAL;                /* 2BBE: released since last tick */
+
+/* ---- own constants (CONST segment, placed at DGROUP 0038h; the compiler
+   allocates WORD DATA first, then BYTE DATA, each in source order) ---- */
+/* tick delay by difficulty (index = value SHR 12) */          /* 0078 */
+DECLARE rgbDelay (16) BYTE DATA (10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4, 3, 3, 3, 2, 2);
+
+/* Player (type 0); fNew = the real player (else an autopilot clone). */
+NewPlayer: PROCEDURE (pos, dir, flags, fNew) PUBLIC REENTRANT;
+   DECLARE pos WORD, dir BYTE, flags BYTE, fNew BYTE;
+   DECLARE tmpl ObjType;
+   DECLARE p WORD;
+   tmpl.delay = 2;
+   tmpl.ctr = 0;
+   tmpl.type = 0;
+   tmpl.size = 4;
+   tmpl.b6 = 5;
+   tmpl.dir = dir;
+   tmpl.flags = flags OR 20H;
+   tmpl.b9 = 0;
+   tmpl.wA = 0;
+   tmpl.wC = 0;
+   tmpl.wE = 0;
+   p = NewObj(.tmpl, pos, 0);
+   IF p <> 0 THEN
+   DO;
+      IF fNew THEN
+      DO;
+         pPlayer = p;
+         wKeysHeld = wKeysHeld AND NOT wKeysUp;
+         wKeysHit = wKeysHit AND NOT wKeysUp;
+         wKeysUp = 0;
+      END;
+      cLives = cLives - 1;
+      CALL UpdateStatus;
+   END;
+END NewPlayer;
+
+/* Rat nest (type 1). */
+NewNest: PROCEDURE (pos, delay) PUBLIC REENTRANT;
+   DECLARE pos WORD, delay BYTE;
+   DECLARE tmpl ObjType;
+   DECLARE p WORD;
+   tmpl.delay = rgbDelay(0);
+   tmpl.ctr = 0;
+   tmpl.type = 1;
+   tmpl.size = 4;
+   tmpl.b6 = 7;
+   tmpl.dir = 2;
+   tmpl.flags = 20H;
+   tmpl.b9 = 0;
+   tmpl.wA = 0;
+   tmpl.wC = 0;
+   tmpl.wE = 0;
+   p = NewObj(.tmpl, pos, delay);
+   IF p <> 0 THEN
+   DO;
+      cFactLeft = cFactLeft + 1;
+      CALL UpdateStatus;
+   END;
+END NewNest;
+
+/* Young rat (type 2) spawned by nest pOwner with value val (rounded to the
+   difficulty level); sometimes pregnant (flag 10H, halves its speed). */
+NewYoung: PROCEDURE (pos, val, pOwner) PUBLIC REENTRANT;
+   DECLARE (pos, val, pOwner) WORD;
+   DECLARE owner BASED pOwner ObjType;
+   DECLARE w WORD;
+   DECLARE v WORD;
+   DECLARE wA WORD;
+   DECLARE tmpl ObjType;
+   DECLARE p WORD;
+   DECLARE q WORD;
+   DECLARE r WORD;
+   DECLARE s WORD;
+   DECLARE t WORD;
+   DECLARE fBig BYTE;
+   DECLARE delay BYTE;
+   w = wDifficulty;
+   v = (SHR(w, 10) + 10) * 5;
+   IF val < v OR val - v < 50 THEN
+   DO;
+      w = SHL(val / 5 - 10, 10);
+      v = (SHR(w, 10) + 10) * 5;
+   END;
+   fBig = Random(0) < SHR(w, 3);
+   IF fBig THEN
+   DO;
+      q = v / 25;
+      r = v MOD 25;
+      s = q * 5;
+      t = s + r;
+      w = SHR(w, 1);
+   END;
+   delay = rgbDelay(SHR(w, 12));
+   wA = SHR(w, 2);
+   tmpl.delay = delay;
+   tmpl.ctr = 0;
+   tmpl.type = 2;
+   tmpl.size = 2;
+   tmpl.b6 = 3;
+   tmpl.dir = 2;
+   tmpl.flags = Random(0) AND 8;
+   IF fBig THEN tmpl.flags = tmpl.flags OR 10H;
+   tmpl.b9 = 0;
+   tmpl.wA = wA;
+   tmpl.wC = v;
+   tmpl.wE = pOwner;
+   p = NewObj(.tmpl, pos, Random(tmpl.delay));
+   IF p <> 0 THEN
+   DO;
+      IF pOwner <> 0 THEN owner.wA = owner.wA + tmpl.wC;
+      cRatsLeft = cRatsLeft + 1;
+      CALL UpdateStatus;
+   END;
+END NewYoung;
+
+/* Small rat (type 4) at pos+delta; speed from its value (score). */
+NewRat: PROCEDURE (pos, delta, dir, flags, val, pOwner) PUBLIC REENTRANT;
+   DECLARE (pos, delta) WORD, (dir, flags) BYTE, (val, pOwner) WORD;
+   DECLARE pp(2) BYTE AT (@pos), dd(2) BYTE AT (@delta);
+   DECLARE w WORD;
+   DECLARE tmpl ObjType;
+   DECLARE p WORD;
+   pp(0) = pp(0) + dd(0);
+   pp(1) = pp(1) + dd(1);
+   IF SHL(val, 1) >= 50 THEN w = SHL(SHL(val, 1) / 5 - 10, 10);
+   ELSE w = 0;
+   tmpl.delay = rgbDelay(SHR(w, 12));
+   tmpl.ctr = 0;
+   tmpl.type = 4;
+   tmpl.size = 1;
+   tmpl.b6 = 1;
+   tmpl.dir = dir;
+   tmpl.flags = flags AND 8;
+   tmpl.b9 = 0;
+   tmpl.wA = 0;
+   tmpl.wC = val;
+   tmpl.wE = pOwner;
+   p = NewObj(.tmpl, pos, Random(tmpl.delay));
+   IF p <> 0 THEN
+   DO;
+      cCrazyLeft = cCrazyLeft + 1;
+      CALL UpdateStatus;
+   END;
+END NewRat;
+
+/* Shot (type 5) at pos+delta flying in dir; passes through its owner,
+   kills whatever else it is fired into. */
+NewShot: PROCEDURE (pos, delta, dir, pOwner) PUBLIC REENTRANT;
+   DECLARE (pos, delta) WORD, dir BYTE, pOwner WORD;
+   DECLARE pp(2) BYTE AT (@pos), dd(2) BYTE AT (@delta);
+   DECLARE tmpl ObjType;
+   DECLARE p WORD;
+   DECLARE pHit WORD;
+   DECLARE b BYTE;
+   DECLARE hit BASED pHit ObjType;
+   pp(0) = pp(0) + dd(0);
+   pp(1) = pp(1) + dd(1);
+   DO WHILE map(pos) <> 0;
+      pHit = FindObjAt(pos);
+      IF pHit <> 0 THEN
+      DO;
+         IF pHit = pOwner THEN pos = Probe(pos, dir, 0, .b);
+         ELSE
+         DO;
+            IF hit.type < 6 THEN CALL KillObj(.hit);
+            RETURN;
+         END;
+      END;
+      ELSE RETURN;
+   END;
+   tmpl.delay = 1;
+   tmpl.ctr = 0;
+   tmpl.type = 5;
+   tmpl.size = 1;
+   tmpl.b6 = 0;
+   tmpl.dir = dir;
+   tmpl.flags = 0;
+   tmpl.b9 = 0;
+   tmpl.wA = 0;
+   tmpl.wC = 0;
+   tmpl.wE = 0;
+   p = NewObj(.tmpl, pos, 0);
+END NewShot;
+
+/* Dying object (type 6) replacing a killed one (called from KillObj):
+   bMap = map char left behind, w14 = bonus, fKind = what to respawn. */
+NewGhost: PROCEDURE (pos, size, b6, flags, bMap, w14, pOwner, fKind) PUBLIC REENTRANT;
+   DECLARE pos WORD, (size, b6, flags, bMap) BYTE, (w14, pOwner) WORD, fKind BYTE;
+   DECLARE tmpl ObjType;
+   DECLARE p WORD;
+   tmpl.delay = 2;
+   tmpl.ctr = 0;
+   tmpl.type = 6;
+   tmpl.size = size;
+   tmpl.b6 = b6;
+   tmpl.dir = 8;
+   tmpl.flags = flags;
+   tmpl.b9 = bMap;
+   tmpl.wA = fKind;
+   tmpl.wC = w14;
+   tmpl.wE = pOwner;
+   p = NewObj(.tmpl, pos, 1);
+END NewGhost;
+
+/* Blast fragment (type 7) at pos+delta flying in dir for size ticks;
+   b9 = spread pattern.  Kills a non-dying object found there instead. */
+NewBlast: PROCEDURE (pos, delta, ctr, size, dir, b9) PUBLIC REENTRANT;
+   DECLARE (pos, delta) WORD, (ctr, size, dir, b9) BYTE;
+   DECLARE pp(2) BYTE AT (@pos), dd(2) BYTE AT (@delta);
+   DECLARE tmpl ObjType;
+   DECLARE p WORD;
+   DECLARE pHit WORD;
+   DECLARE hit BASED pHit ObjType;
+   pp(0) = pp(0) + dd(0);
+   pp(1) = pp(1) + dd(1);
+   IF map(pos) <> 0 THEN
+   DO;
+      pHit = FindObjAt(pos);
+      IF pHit <> 0 THEN
+         IF hit.type < 6 THEN CALL KillObj(.hit);
+      RETURN;
+   END;
+   tmpl.delay = 2;
+   tmpl.ctr = ctr;
+   tmpl.type = 7;
+   tmpl.size = 1;
+   tmpl.b6 = size;
+   tmpl.dir = dir;
+   tmpl.flags = 0;
+   tmpl.b9 = b9;
+   tmpl.wA = 0;
+   tmpl.wC = 0;
+   tmpl.wE = 0;
+   p = NewObj(.tmpl, pos, 1);
+END NewBlast;
+
+/* Probe: try to step from pos in direction dir (0..7 = N,NE,E,SE,S,SW,W,NW,
+   8 = object's own direction).  For 2x2 objects (size > 1) the leading edge
+   cells are probed.  *pb receives the first non-empty map cell (0 = free).
+   Returns the new position. */
+Probe: PROCEDURE (pos, dir, p, pb) WORD PUBLIC REENTRANT;
+   DECLARE pos WORD, dir BYTE, (p, pb) WORD;
+   DECLARE obj BASED p ObjType, b BASED pb BYTE;
+   DECLARE q WORD, qq(2) BYTE AT (@q);
+   /* 0088: on even ticks vertical movement is suppressed (cells are tall) */
+   DECLARE rgbDirAlt (8) BYTE DATA (8, 2, 2, 2, 8, 6, 6, 6);
+   IF dir = 8 THEN
+   DO;
+      dir = obj.dir;
+      IF (obj.ctr AND 1) = 0 THEN dir = rgbDirAlt(dir);
+   END;
+   IF p <> 0 THEN
+      IF obj.size > 1 THEN dir = dir + 8 + 1;
+   q = pos;
+   DO CASE dir;
+      /* 0 N */
+      DO;
+         qq(1) = qq(1) - 1; b = map(q);
+      END;
+      /* 1 NE */
+      DO;
+         qq(0) = qq(0) + 1; b = map(q);
+         IF b = 0 THEN DO; qq(1) = qq(1) - 1; b = map(q); END;
+      END;
+      /* 2 E */
+      DO;
+         qq(0) = qq(0) + 1; b = map(q);
+      END;
+      /* 3 SE */
+      DO;
+         qq(0) = qq(0) + 1; b = map(q);
+         IF b = 0 THEN DO; qq(1) = qq(1) + 1; b = map(q); END;
+      END;
+      /* 4 S */
+      DO;
+         qq(1) = qq(1) + 1; b = map(q);
+      END;
+      /* 5 SW */
+      DO;
+         qq(0) = qq(0) - 1; b = map(q);
+         IF b = 0 THEN DO; qq(1) = qq(1) + 1; b = map(q); END;
+      END;
+      /* 6 W */
+      DO;
+         qq(0) = qq(0) - 1; b = map(q);
+      END;
+      /* 7 NW */
+      DO;
+         qq(0) = qq(0) - 1; b = map(q);
+         IF b = 0 THEN DO; qq(1) = qq(1) - 1; b = map(q); END;
+      END;
+      /* 8 none */
+      b = 0;
+      /* 9 N (2x2) */
+      DO;
+         qq(0) = qq(0) + 1; qq(1) = qq(1) - 1; b = map(q);
+         IF b = 0 THEN DO; qq(0) = qq(0) - 1; b = map(q); END;
+      END;
+      /* 10 NE (2x2) */
+      DO;
+         qq(0) = qq(0) + 2; qq(1) = qq(1) + 1; b = map(q);
+         IF b = 0 THEN
+         DO;
+            qq(1) = qq(1) - 1; b = map(q);
+            IF b = 0 THEN
+            DO;
+               qq(1) = qq(1) - 1; b = map(q);
+               IF b = 0 THEN DO; qq(0) = qq(0) - 1; b = map(q); END;
+            END;
+         END;
+      END;
+      /* 11 E (2x2) */
+      DO;
+         qq(0) = qq(0) + 2; qq(1) = qq(1) + 1; b = map(q);
+         IF b = 0 THEN
+         DO;
+            qq(1) = qq(1) - 1; b = map(q);
+            IF b = 0 THEN qq(0) = qq(0) - 1;
+         END;
+      END;
+      /* 12 SE (2x2) */
+      DO;
+         qq(0) = qq(0) + 2; b = map(q);
+         IF b = 0 THEN
+         DO;
+            qq(1) = qq(1) + 1; b = map(q);
+            IF b = 0 THEN
+            DO;
+               qq(1) = qq(1) + 1; b = map(q);
+               IF b = 0 THEN
+               DO;
+                  qq(0) = qq(0) - 1; b = map(q);
+                  IF b = 0 THEN qq(1) = qq(1) - 1;
+               END;
+            END;
+         END;
+      END;
+      /* 13 S (2x2) */
+      DO;
+         qq(1) = qq(1) + 2; qq(0) = qq(0) + 1; b = map(q);
+         IF b = 0 THEN
+         DO;
+            qq(0) = qq(0) - 1; b = map(q);
+            IF b = 0 THEN qq(1) = qq(1) - 1;
+         END;
+      END;
+      /* 14 SW (2x2) */
+      DO;
+         qq(1) = qq(1) + 2; b = map(q);
+         IF b = 0 THEN
+         DO;
+            qq(0) = qq(0) - 1; b = map(q);
+            IF b = 0 THEN
+            DO;
+               qq(1) = qq(1) - 1; b = map(q);
+               IF b = 0 THEN
+               DO;
+                  qq(1) = qq(1) - 1; b = map(q);
+                  IF b = 0 THEN qq(1) = qq(1) + 1;
+               END;
+            END;
+         END;
+      END;
+      /* 15 W (2x2) */
+      DO;
+         qq(0) = qq(0) - 1; qq(1) = qq(1) + 1; b = map(q);
+         IF b = 0 THEN DO; qq(1) = qq(1) - 1; b = map(q); END;
+      END;
+      /* 16 NW (2x2) */
+      DO;
+         qq(0) = qq(0) - 1; qq(1) = qq(1) + 1; b = map(q);
+         IF b = 0 THEN
+         DO;
+            qq(1) = qq(1) - 1; b = map(q);
+            IF b = 0 THEN
+            DO;
+               qq(1) = qq(1) - 1; b = map(q);
+               IF b = 0 THEN
+               DO;
+                  qq(0) = qq(0) + 1; b = map(q);
+                  IF b = 0 THEN qq(0) = qq(0) - 1;
+               END;
+            END;
+         END;
+      END;
+      /* 17 none (2x2) */
+      b = 0;
+   END;
+   RETURN q;
+END Probe;
+
+/* Handler for type 0 (player, 2x2).  Bit 0 of flags = autopilot (demo).
+   wKeysHeld = keys held, wKeysHit = keys pressed since last tick, wKeysUp = keys
+   released: bits 0-3 direction keys, 30H fire direction (ahead/left/right/back),
+   40H move, 80H fire, 100H autopilot, 200H bomb. */
+PlayerTick: PROCEDURE (pos, p) PUBLIC REENTRANT;
+   DECLARE (pos, p) WORD;
+   DECLARE obj BASED p ObjType;
+   DECLARE newPos WORD;
+   DECLARE pTarget WORD;
+   DECLARE tpos WORD;
+   DECLARE r WORD;
+   DECLARE idx WORD;
+   DECLARE bDir BYTE;
+   DECLARE b BYTE;
+   DECLARE fireDir BYTE;
+   DECLARE dirX BYTE;
+   /* 0090: direction for key bits 1=N 2=E 4=S 8=W (8 = none) */
+   DECLARE rgbKeyDir (64) BYTE DATA (8, 0, 2, 1, 4, 8, 3, 2, 6, 7, 8, 0, 5, 6, 4, 8);
+   IF p = pPlayer THEN
+      IF (wKeysHeld OR wKeysHit) <> 0 THEN
+      DO;
+         obj.flags = obj.flags AND 0FEH;
+         obj.b9 = 0;
+      END;
+   IF obj.wA <> 0 THEN obj.wA = obj.wA - 1;
+   IF (obj.flags AND 1) <> 0 THEN
+   DO;
+      obj.flags = obj.flags OR 40H;
+      IF obj.b9 <> 0 THEN newPos = Turn(pos, .obj);
+      ELSE
+      DO;
+         pTarget = FindTarget(pos);
+         IF pTarget = 0 THEN
+         DO;
+            r = Random(100);
+            IF r = 0 THEN bDir = (obj.dir + 1 AND 7) + 8 * 16;
+            ELSE IF r = 1 THEN bDir = (obj.dir - 1 AND 7) + 8 * 16;
+            ELSE bDir = obj.dir + 8 * 16;
+         END;
+         ELSE
+         DO;
+            tpos = rgPos(SHR(pTarget - .rgObj, 2));
+            idx = DirIndex(pos, tpos);
+            bDir = rgbSeekPlayer(idx);
+         END;
+         obj.dir = bDir AND 7;
+         newPos = Probe(pos, 8, .obj, .b);
+         IF b = 0 THEN
+         DO;
+            fireDir = SHR(bDir, 4);
+            IF fireDir <> 8 THEN
+               IF obj.wA = 0 THEN
+               DO;
+                  CALL Fire(.obj, newPos, fireDir);
+                  obj.wA = wShotReload;
+               END;
+         END;
+         ELSE newPos = Turn(pos, .obj);
+      END;
+   END;
+   ELSE
+   DO;
+      wKeysHeld = wKeysHeld OR wKeysHit;
+      bDir = rgbKeyDir(wKeysHeld AND 0FH);
+      IF bDir <> 8 THEN obj.dir = bDir;
+      IF (wKeysHeld AND 40H) <> 0 THEN
+      DO;
+         obj.flags = obj.flags OR 40H;
+         IF (wKeysHit AND 40H) <> 0 THEN obj.ctr = 1;
+         newPos = Probe(pos, 8, .obj, .b);
+         IF b <> 0 THEN GOTO done;
+      END;
+      ELSE
+      DO;
+         obj.flags = obj.flags AND 0BFH;
+         newPos = pos;
+      END;
+      IF (wKeysHeld AND 80H) <> 0 THEN
+      DO;
+         DO CASE SHR(wKeysHeld AND 30H, 4);
+            dirX = obj.dir;
+            dirX = obj.dir - 2 AND 7;
+            dirX = obj.dir + 2 AND 7;
+            dirX = obj.dir XOR 4;
+         END;
+         IF (wKeysHit AND 80H) <> 0 OR obj.wA = 0 THEN
+         DO;
+            CALL Fire(.obj, newPos, dirX);
+            obj.wA = wShotReload;
+         END;
+      END;
+      IF (wKeysHeld AND 200H) <> 0 THEN
+         IF (wKeysHit AND 200H) <> 0 OR obj.wA = 0 THEN
+         DO;
+            CALL SpawnClone(newPos, obj.dir);
+            obj.wA = wShotReload;
+         END;
+      IF (wKeysHeld AND 100H) <> 0 THEN obj.flags = obj.flags OR 1;
+done:
+      wKeysHeld = wKeysHeld AND NOT wKeysUp;
+      wKeysUp, wKeysHit = 0;
+   END;
+   CALL MoveCur(newPos);
+END PlayerTick;
+
+/* Fire a shot from object p (at pos) in direction dir; the start offset
+   depends on the handedness flag (08H). */
+Fire: PROCEDURE (p, pos, dir) PUBLIC REENTRANT;
+   DECLARE (p, pos) WORD, dir BYTE;
+   DECLARE obj BASED p ObjType;
+   DECLARE delta WORD;
+   /* 0038/0048: shot start offsets (dx,dy bytes) for the 2x2 player */
+   DECLARE rgwShotDelta (8) WORD DATA (0FF00H, 0FF02H, 0002H, 0202H, 0201H, 02FFH, 00FFH, 0FFFFH);
+   DECLARE rgwShotDelta2 (8) WORD DATA (0FF01H, 0FF02H, 0002H, 0202H, 0200H, 02FFH, 00FFH, 0FFFFH);
+   IF (obj.flags AND 8) <> 0 THEN delta = rgwShotDelta(dir);
+   ELSE delta = rgwShotDelta2(dir);
+   CALL NewShot(pos, delta, dir, .obj);
+END Fire;
+
+/* Spawn an autopilot clone of the player 16 columns / 8 rows away in
+   direction dir (costs one life). */
+SpawnClone: PROCEDURE (pos, dir) PUBLIC REENTRANT;
+   DECLARE pos WORD, dir BYTE;
+   DECLARE pp(2) BYTE AT (@pos);
+   DO CASE dir;
+      pp(1) = pp(1) - 8;
+      DO; pp(0) = pp(0) + 16; pp(1) = pp(1) - 8; END;
+      pp(0) = pp(0) + 16;
+      DO; pp(0) = pp(0) + 16; pp(1) = pp(1) + 8; END;
+      pp(1) = pp(1) + 8;
+      DO; pp(0) = pp(0) - 16; pp(1) = pp(1) + 8; END;
+      pp(0) = pp(0) - 16;
+      DO; pp(0) = pp(0) - 16; pp(1) = pp(1) - 8; END;
+   END;
+   IF cLives <> 0 THEN
+      IF IsFree(pos, 4) THEN
+         CALL NewPlayer(pos, dir, Random(0) AND 8 OR 1, 0);
+END SpawnClone;
+
+/* Handler for type 1 (rat nest, 2x2).  wA = value of young spawned,
+   wC = value of young killed; spawns a young rat to its right while the
+   living offspring are below half the capacity wFactValue. */
+NestTick: PROCEDURE (pos, p) PUBLIC REENTRANT;
+   DECLARE (pos, p) WORD;
+   DECLARE pp(2) BYTE AT (@pos);
+   DECLARE obj BASED p ObjType;
+   DECLARE half WORD;
+   DECLARE room WORD;
+   DECLARE alive WORD;
+   DECLARE killed WORD;
+   DECLARE spawned WORD;
+   DECLARE q WORD, qq(2) BYTE AT (@q);
+   spawned = obj.wA;
+   killed = obj.wC;
+   alive = spawned - killed;
+   room = wFactValue - spawned;
+   half = SHR(wFactValue, 1);
+   IF half > alive AND room <> 0 THEN
+   DO;
+      qq(0) = pp(0) + 2;
+      qq(1) = pp(1) + 1;
+      IF map(q) = 0 THEN
+      DO;
+         qq(1) = qq(1) - 1;
+         IF map(q) = 0 THEN CALL NewYoung(q, room, .obj);
+      END;
+   END;
+   obj.delay = rgbDelay(SHR(wDifficulty, 12));
+   CALL MoveCur(pos);
+END NestTick;
+
+/* Handler for type 2 (young rat, 1x2): grows into an adult (type 3, 2x2)
+   as soon as the cells to its right are free. */
+YoungTick: PROCEDURE (pos, p) PUBLIC REENTRANT;
+   DECLARE (pos, p) WORD;
+   DECLARE obj BASED p ObjType;
+   DECLARE q WORD, qq(2) BYTE AT (@q);
+   DECLARE save ObjType;
+   DECLARE wUnused WORD;
+   q = pos;
+   qq(0) = qq(0) + 1;
+   IF map(q) = 0 THEN
+   DO;
+      qq(1) = qq(1) + 1;
+      IF map(q) = 0 THEN
+      DO;
+         CALL FreeObj(.save, .obj);
+         save.type = 3;
+         save.size = 4;
+         IF (save.flags AND 10H) = 0 THEN save.b6 = 1;
+         p = NewObj(.save, pos, save.delay - 1);
+         RETURN;
+      END;
+   END;
+   CALL MoveCur(pos);
+END YoungTick;
+
+/* Handler for types 3 (adult rat, 2x2) and 4 (small rat, 1x1). */
+RatTick: PROCEDURE (pos, p) PUBLIC REENTRANT;
+   DECLARE (pos, p) WORD;
+   DECLARE obj BASED p ObjType;
+   DECLARE pOwn WORD;
+   DECLARE newPos WORD;
+   DECLARE r WORD;
+   DECLARE delta WORD;
+   DECLARE idx WORD;
+   DECLARE ownerPos WORD;
+   DECLARE delta2 WORD;
+   DECLARE b BYTE;
+   DECLARE bDir BYTE;
+   DECLARE fireDir BYTE;
+   DECLARE ownerDir BYTE;
+   DECLARE owner BASED pOwn ObjType;
+   /* 0058/0068: shot start offsets for 2x2 rats, by direction and handedness */
+   DECLARE rgwRatDelta (8) WORD DATA (0FF00H, 0FF01H, 0002H, 0102H, 0201H, 0200H, 01FFH, 00FFH);
+   DECLARE rgwRatDelta2 (8) WORD DATA (0FF01H, 0002H, 0102H, 0201H, 0200H, 01FFH, 00FFH, 0FF00H);
+   /* 00D0: random heading change */
+   DECLARE rgbTurn (9) BYTE DATA (0FEH, 0FFH, 0FFH, 0, 0, 0, 1, 1, 2);
+   pOwn = obj.wE;
+   IF pOwn = 0 AND fCrazyRats THEN
+   DO;
+      /* orphan rat: random walk, shoots at random */
+      r = Random(7);
+      IF (obj.flags AND 8) = 0 THEN r = r + 2;
+      obj.dir = obj.dir + rgbTurn(r) AND 7;
+      newPos = Probe(pos, 8, .obj, .b);
+      IF b = 0 THEN
+         IF (obj.ctr AND 1) = 0 THEN
+            IF Random(0) < obj.wA THEN
+            DO;
+               IF (obj.flags AND 8) <> 0 THEN delta = rgwRatDelta(obj.dir);
+               ELSE delta = rgwRatDelta2(obj.dir);
+               CALL NewShot(newPos, delta, obj.dir, .obj);
+            END;
+   END;
+   ELSE IF obj.b9 <> 0 THEN newPos = Turn(pos, .obj);
+   ELSE IF CanSee(pos, obj.size) THEN
+   DO;
+      /* player in view: chase him and shoot */
+      idx = DirIndex(pos, posPlayer);
+      IF obj.type = 3 THEN bDir = rgbSeek3(idx);
+      ELSE bDir = rgbSeek4(idx);
+      obj.dir = bDir AND 7;
+      newPos = Probe(pos, 8, .obj, .b);
+      IF b >= 0C0H THEN GOTO move;   /* player sprite -> run into him (GOTO form needed for exact code) */
+      IF b = 0 THEN
+      DO;
+         fireDir = SHR(bDir, 4);
+         IF fireDir <> 8 THEN
+            IF (obj.ctr AND 1) = 0 THEN
+               IF Random(0) < obj.wA THEN
+               DO;
+                  IF pOwn = 0 THEN ownerDir = 8;
+                  ELSE
+                  DO;
+                     ownerPos = rgPos(SHR(.owner - .rgObj, 2));
+                     idx = DirIndex(pos, ownerPos);
+                     ownerDir = SHR(rgbSeek3(idx), 4);
+                  END;
+                  IF fireDir <> ownerDir THEN
+                  DO;
+                     IF (obj.flags AND 8) <> 0 THEN delta2 = rgwRatDelta(fireDir);
+                     ELSE delta2 = rgwRatDelta2(fireDir);
+                     CALL NewShot(newPos, delta2, fireDir, .obj);
+                  END;
+               END;
+      END;
+      ELSE newPos = Turn(pos, .obj);
+   END;
+   ELSE
+   DO;
+      /* wander */
+      idx = Random(7);
+      IF (obj.flags AND 8) = 0 THEN idx = idx + 2;
+      obj.dir = obj.dir + rgbTurn(idx) AND 7;
+      newPos = Probe(pos, 8, .obj, .b);
+      IF b <> 0 THEN
+      DO;
+         newPos = pos;
+         obj.dir = obj.dir XOR 4;
+      END;
+   END;
+move:
+   CALL MoveCur(newPos);
+END RatTick;
+
+/* Handler for type 5 (shot): fly straight on. */
+ShotTick: PROCEDURE (pos, p) PUBLIC REENTRANT;
+   DECLARE (pos, p) WORD;
+   DECLARE obj BASED p ObjType;
+   DECLARE b BYTE;
+   CALL MoveCur(Probe(pos, 8, .obj, .b));
+END ShotTick;
+
+/* Handler for type 6 (dying object).  ctr counts ticks, b6 = blast length,
+   b9 = map char to leave behind, wA = kind to respawn (0 player, 1 nest,
+   0FFH none).  Emits blast fragments (type 7) around itself. */
+GhostTick: PROCEDURE (pos, p) PUBLIC REENTRANT;
+   DECLARE (pos, p) WORD;
+   DECLARE obj BASED p ObjType;
+   DECLARE save ObjType;
+   DECLARE cell WORD;
+   DECLARE pProc POINTER;
+   DECLARE cells (4) WORD;
+   DECLARE ctr BYTE;
+   DECLARE b6 BYTE;
+   ctr = obj.ctr;
+   b6 = obj.b6;
+   IF ctr >= 3 OR b6 = 0 THEN
+   DO;
+      CALL FreeObj(.save, .obj);
+      IF (save.flags AND 10H) <> 0 THEN
+      DO;
+         /* pregnant rat: releases four small rats */
+         CALL NewRat(pos, 0, 7, save.flags, save.wC, save.wE);
+         CALL NewRat(pos, 1, 1, save.flags, save.wC, save.wE);
+         CALL NewRat(pos, 101H, 3, save.flags, save.wC, save.wE);
+         CALL NewRat(pos, 100H, 5, save.flags, save.wC, save.wE);
+      END;
+      IF save.wA <> 0FFH THEN
+      DO;
+         DO WHILE NOT IsFree(cell := RandomCell, 4);
+         END;
+         DO CASE save.wA;
+            CALL NewPlayer(cell, 4, Random(0) AND 8 OR 1, 0);
+            CALL NewNest(cell, 0);
+         END;
+      END;
+      IF save.b9 <> 0 THEN
+      DO;
+         pProc = rgpDraw(save.size);
+         CALL pProc(save.b9, pos, .cells);
+      END;
+      RETURN;
+   END;
+   IF ctr >= b6 THEN GOTO done;   /* GOTO+label instead of IF..DO: drops cached ctr/b6 regs */
+   DO;
+      IF obj.size = 1 THEN
+      DO;
+         CALL NewBlast(pos, 1, ctr, b6, 2, 3);
+         CALL NewBlast(pos, 0FFH, ctr, b6, 6, 9);
+         IF ctr = 1 THEN
+         DO;
+            CALL NewBlast(pos, 0FF00H, ctr, b6, 0, 0);
+            CALL NewBlast(pos, 100H, ctr, b6, 4, 6);
+         END;
+      END;
+      ELSE IF obj.size = 2 THEN
+      DO;
+         CALL NewBlast(pos, 1, ctr, b6, 2, 2);
+         CALL NewBlast(pos, 101H, ctr, b6, 2, 4);
+         CALL NewBlast(pos, 1FFH, ctr, b6, 6, 8);
+         CALL NewBlast(pos, 0FFH, ctr, b6, 6, 0AH);
+         IF ctr = 1 THEN
+         DO;
+            CALL NewBlast(pos, 0FF00H, ctr, b6, 0, 0);
+            CALL NewBlast(pos, 200H, ctr, b6, 4, 6);
+         END;
+      END;
+      ELSE
+      DO;
+         CALL NewBlast(pos, 2, ctr, b6, 2, 2);
+         CALL NewBlast(pos, 102H, ctr, b6, 2, 4);
+         CALL NewBlast(pos, 1FFH, ctr, b6, 6, 8);
+         CALL NewBlast(pos, 0FFH, ctr, b6, 6, 0AH);
+         IF ctr = 1 THEN
+         DO;
+            CALL NewBlast(pos, 0FF01H, ctr, b6, 0, 1);
+            CALL NewBlast(pos, 201H, ctr, b6, 4, 5);
+            CALL NewBlast(pos, 200H, ctr, b6, 4, 7);
+            CALL NewBlast(pos, 0FF00H, ctr, b6, 0, 0BH);
+         END;
+      END;
+   END;
+done:
+   CALL MoveCur(pos);
+END GhostTick;
+
+/* Handler for type 7 (blast fragment): flies in its direction for b6 ticks;
+   b9 selects how it spreads (12 = no further spreading). */
+BlastTick: PROCEDURE (pos, p) PUBLIC REENTRANT;
+   DECLARE (pos, p) WORD;
+   DECLARE obj BASED p ObjType;
+   DECLARE save ObjType;
+   DECLARE ctr BYTE;
+   DECLARE b6 BYTE;
+   DECLARE b BYTE;
+   ctr = obj.ctr;
+   b6 = obj.b6;
+   IF ctr >= b6 THEN
+   DO;
+      CALL FreeObj(.save, .obj);
+      RETURN;
+   END;
+   pos = Probe(pos, 8, .obj, .b);
+   IF b = 0 THEN
+   DO CASE obj.b9;
+      DO;
+         CALL NewBlast(pos, 1, ctr, b6, 1, 0CH);
+         CALL NewBlast(pos, 0FFH, ctr, b6, 7, 0CH);
+      END;
+      CALL NewBlast(pos, 1, ctr, b6, 1, 0CH);
+      IF (ctr AND 1) <> 0 AND ctr <> 1 THEN
+         CALL NewBlast(pos, 0FF00H, ctr, b6, 1, 0CH);
+      IF (ctr AND 1) <> 0 AND ctr <> 1 THEN
+      DO;
+         CALL NewBlast(pos, 0FF00H, ctr, b6, 1, 0CH);
+         CALL NewBlast(pos, 100H, ctr, b6, 3, 0CH);
+      END;
+      IF (ctr AND 1) <> 0 AND ctr <> 1 THEN
+         CALL NewBlast(pos, 100H, ctr, b6, 3, 0CH);
+      CALL NewBlast(pos, 1, ctr, b6, 3, 0CH);
+      DO;
+         CALL NewBlast(pos, 1, ctr, b6, 3, 0CH);
+         CALL NewBlast(pos, 0FFH, ctr, b6, 5, 0CH);
+      END;
+      CALL NewBlast(pos, 0FFH, ctr, b6, 5, 0CH);
+      IF (ctr AND 1) <> 0 AND ctr <> 1 THEN
+         CALL NewBlast(pos, 100H, ctr, b6, 5, 0CH);
+      IF (ctr AND 1) <> 0 AND ctr <> 1 THEN
+      DO;
+         CALL NewBlast(pos, 100H, ctr, b6, 5, 0CH);
+         CALL NewBlast(pos, 0FF00H, ctr, b6, 7, 0CH);
+      END;
+      IF (ctr AND 1) <> 0 AND ctr <> 1 THEN
+         CALL NewBlast(pos, 0FF00H, ctr, b6, 7, 0CH);
+      CALL NewBlast(pos, 0FFH, ctr, b6, 7, 0CH);
+      ;
+   END;
+   CALL MoveCur(pos);
+END BlastTick;
+
+/* Obstacle avoidance: b9 = number of 45-degree turns the object is away
+   from its intended heading; turn back toward it while possible, else keep
+   turning away (direction of turning by handedness flag 08H). */
+Turn: PROCEDURE (pos, p) WORD PUBLIC REENTRANT;
+   DECLARE (pos, p) WORD;
+   DECLARE obj BASED p ObjType;
+   DECLARE newPos WORD;
+   DECLARE step BYTE;
+   DECLARE d BYTE;
+   DECLARE n BYTE;
+   DECLARE lim BYTE;
+   DECLARE b BYTE;
+   IF (obj.flags AND 8) <> 0 THEN step = 1;
+   ELSE step = 0FFH;
+   d = obj.dir;
+   n = obj.b9;
+   IF n <> 0 THEN
+   DO;
+      DO WHILE n <> 0;
+         d = d - step AND 7;
+         n = n - 1;
+         newPos = Probe(pos, d, .obj, .b);
+         IF b <> 0 THEN GOTO away;
+      END;
+      GOTO ok;
+   END;
+away:
+   lim = n + 8;
+again:
+   d = step + d AND 7;
+   n = n + 1;
+chk:   /* unreferenced label: needed so that n is not kept in AL (byte-exact) */
+   IF n >= lim THEN GOTO fail;
+   newPos = Probe(pos, d, .obj, .b);
+   IF b <> 0 THEN GOTO again;
+ok:
+   obj.dir = d;
+   obj.b9 = n;
+   RETURN Probe(pos, 8, .obj, .b);
+fail:
+   RETURN pos;
+END Turn;
+
+/* TRUE if pos lies inside the view window (bViewX/Y, wViewW/H). */
+CanSee: PROCEDURE (pos, size) BYTE PUBLIC REENTRANT;
+   DECLARE pos WORD, size BYTE;
+   DECLARE pp(2) BYTE AT (@pos);
+   DECLARE dx BYTE;
+   DECLARE dy BYTE;
+   IF pPlayer = 0 THEN RETURN FALSE;
+   dx = pp(0) - bViewX;
+   dy = pp(1) - bViewY;
+   IF size > 1 THEN
+   DO;
+      IF dx = 0FFH THEN dx = 0;
+      IF dy = 0FFH THEN dy = 0;
+   END;
+   RETURN dx < wViewW AND dy < wViewH;
+END CanSee;
+
+/* Index into the 20x16 direction tables (rgbSeek*) for the vector from
+   b to a, scaled down until it fits (-9..10, -7..8). */
+DirIndex: PROCEDURE (a, b) WORD PUBLIC REENTRANT;
+   DECLARE (a, b) WORD;
+   DECLARE aa(2) BYTE AT (@a), bb(2) BYTE AT (@b);
+   DECLARE dx BYTE;
+   DECLARE dy BYTE;
+   dx = aa(0) - bb(0);
+   dy = aa(1) - bb(1);
+   DO WHILE (dx > 10 AND dx <= 0F6H) OR (dy > 8 AND dy <= 0F8H);
+      dx = SHR(dx, 1);
+      IF dx >= 40H THEN dx = dx + 80H;
+      dy = SHR(dy, 1);
+      IF dy >= 40H THEN dy = dy + 80H;
+   END;
+   RETURN DOUBLE(dy + 7) * 20 + (dx + 9);
+END DirIndex;
+
+/* Autopilot: find the most attractive target (rat/nest) in view. */
+FindTarget: PROCEDURE (pos) WORD PUBLIC REENTRANT;
+   DECLARE pos WORD;
+   DECLARE pBest WORD;
+   DECLARE best WORD;
+   DECLARE iPos WORD;
+   DECLARE i WORD;
+   DECLARE q WORD;
+   DECLARE score WORD;
+   DECLARE dist WORD;
+   DECLARE obj BASED q ObjType;
+   /* 00D9: base score of a rat by its tick delay (faster = juicier) */
+   DECLARE rgbNearScore (16) BYTE DATA (0FFH, 0B0H, 0A0H, 97H, 90H, 8BH, 87H,
+           83H, 80H, 7DH, 7BH, 79H, 77H, 75H, 73H, 71H);
+   i, iPos, best, pBest = 0;
+   q = .rgObj;
+   DO WHILE i < 256;
+      IF obj.type < 8 THEN
+      DO;
+         DO CASE obj.type;
+            score = 0;
+            DO;
+               IF CanSee(rgPos(iPos), obj.size) THEN
+               DO;
+                  dist = Distance(pos, rgPos(iPos));
+                  score = 70H - SHL(dist, 4);
+               END;
+               ELSE score = 0;
+            END;
+            DO;
+               IF CanSee(rgPos(iPos), obj.size) THEN
+               DO;
+                  dist = Distance(pos, rgPos(iPos));
+                  score = rgbNearScore(obj.delay) - SHL(dist, 4);
+               END;
+               ELSE score = 0;
+            END;
+            DO;
+               IF CanSee(rgPos(iPos), obj.size) THEN
+               DO;
+                  dist = Distance(pos, rgPos(iPos));
+                  score = rgbNearScore(obj.delay) - SHL(dist, 4);
+               END;
+               ELSE score = 0;
+            END;
+            DO;
+               IF CanSee(rgPos(iPos), obj.size) THEN
+               DO;
+                  dist = Distance(pos, rgPos(iPos));
+                  score = rgbNearScore(obj.delay) - SHL(dist, 4);
+               END;
+               ELSE score = 0;
+            END;
+            score = 0;
+            score = 0;
+            score = 0;
+         END;
+         IF best < score THEN
+         DO;
+            pBest = .obj;
+            best = score;
+         END;
+      END;
+      iPos = iPos + 4;
+      i = i + 1;
+      q = q + 16;
+   END;
+   RETURN pBest;
+END FindTarget;
+
+/* Distance class: log2(max(|dx|/2, |dy|)) + 1 (0 = same cell). */
+Distance: PROCEDURE (a, b) WORD PUBLIC REENTRANT;
+   DECLARE (a, b) WORD;
+   DECLARE aa(2) BYTE AT (@a), bb(2) BYTE AT (@b);
+   DECLARE n WORD;
+   DECLARE dx BYTE;
+   DECLARE dy BYTE;
+   dx = aa(0) - bb(0);
+   IF dx > 80H THEN dx = -dx;
+   dy = aa(1) - bb(1);
+   IF dy > 80H THEN dy = -dy;
+   dx = SHR(dx, 1);
+   IF dx < dy THEN dx = dy;
+   n = 0;
+   DO WHILE dx <> 0;
+      n = n + 1;
+      dx = SHR(dx, 1);
+   END;
+   RETURN n;
+END Distance;
+
+END RatsB;

@@ -1,0 +1,43 @@
+$MEDIUM OPTIMIZE(2)
+/* VidThk: video entry thunks (image 6F28-6F80).  Each procedure calls the
+   selected asm driver entry point rgpVid(i) (set up by VidInit); the
+   driver addresses the caller arguments through the thunk BP.          */
+VidThk: DO;
+DECLARE rgpVid (8) POINTER EXTERNAL;
+DECLARE pVid0 POINTER AT (@rgpVid(0)), pReadChars POINTER AT (@rgpVid(1)),
+        pGetAttr POINTER AT (@rgpVid(2)), pFillAttr POINTER AT (@rgpVid(3)),
+        pSetAttr POINTER AT (@rgpVid(4)), pFillChars POINTER AT (@rgpVid(5)),
+        pPutChars POINTER AT (@rgpVid(6)), pWriteChars POINTER AT (@rgpVid(7));
+VidReadChars: PROCEDURE (w1, w2, w3, w4, w5) PUBLIC REENTRANT;
+   DECLARE (w1, w2, w3, w4, w5) WORD;
+   CALL pVid0;
+END VidReadChars;
+VidReadCells: PROCEDURE (pb, col, row, cnt) PUBLIC REENTRANT;
+   DECLARE pb POINTER, (col, row, cnt) WORD;
+   CALL pReadChars;
+END VidReadCells;
+VidGetCell: PROCEDURE (col, row) PUBLIC REENTRANT;  /* returns AX from driver */
+   DECLARE (col, row) WORD;
+   CALL pGetAttr;
+END VidGetCell;
+VidFillAttr: PROCEDURE (col, row, cnt, attr) PUBLIC REENTRANT;
+   DECLARE (col, row, cnt) WORD, attr BYTE;
+   CALL pFillAttr;
+END VidFillAttr;
+VidPutCell: PROCEDURE (col, row, w) PUBLIC REENTRANT;
+   DECLARE (col, row, w) WORD;
+   CALL pSetAttr;
+END VidPutCell;
+VidFillCells: PROCEDURE (col, row, cnt, ch) PUBLIC REENTRANT;
+   DECLARE (col, row, cnt) WORD, ch BYTE;
+   CALL pFillChars;
+END VidFillCells;
+VidPutChars: PROCEDURE (col, row, cnt, pb, attr) PUBLIC REENTRANT;
+   DECLARE (col, row, cnt) WORD, pb POINTER, attr BYTE;
+   CALL pPutChars;
+END VidPutChars;
+VidPutCells: PROCEDURE (col, row, cnt, pb) PUBLIC REENTRANT;
+   DECLARE (col, row, cnt) WORD, pb POINTER;
+   CALL pWriteChars;
+END VidPutCells;
+END VidThk;

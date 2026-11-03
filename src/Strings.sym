@@ -1,0 +1,10 @@
+# Strings private symbols: NAME FRAME OFFSET (hex)
+# --- libraries
+NOTNIL 55F 27
+FRACDIV 55F 15a
+FRACMUL 55F 177
+# --- CTOS
+ULCMPB ffff 236
+GETUCB ffe8 396
+LQ_DWORD_DIV 79c 0
+LQ_DWORD_MUL 79c 59

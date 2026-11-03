@@ -1,0 +1,310 @@
+$MEDIUM OPTIMIZE(2)
+DateTime: DO;
+/* Date/time utilities (image 0x362A-0x3CB8, frame 0362h, code at offset 0Ah).
+   No CONST/DATA of its own.
+   A CTOS date/time is a DWORD: low word = seconds in the half day (0..43199),
+   high word = dayTimes2 (half days since 1 Mar 1952).
+   ExpDt is the CTOS expanded form: year WORD, month (0-based), day, dayOfWeek,
+   hour, minute, second BYTE.
+
+   DtDiff(dt1, dt2) DWORD            dt1 - dt2 in seconds (dt1 >= dt2)
+   DtSeconds(dt) DWORD               dt as a seconds count
+   DtAddSeconds(dt, n) DWORD         dt + n seconds
+   DtMidnight(dt) DWORD              start of dt's day
+   CompactDt(pExp) DWORD             CompactDateTime; dayOfWeek 0FFh = unknown
+                                     (tries 0,1,... until the day agrees)
+   GetNow DWORD                      GetDateTime
+   DtSubSeconds(dt, n) DWORD         dt - n seconds
+   ExpandDt(pExpRet, dt)             ExpandDateTime
+   ParseDateTime(pDtRet, pb, cb) BYTE  parse "mm/dd[/yy] [hh:mm[:ss]]"; the
+                                     missing date part is today, missing time
+                                     part 00:00:00; FALSE on a syntax error
+   ParseDateTimeSb(pDtRet, psb) BYTE same for a length-prefixed string
+   FmtDateTime(psbRet, dt, psbTemplate)  FormatDateTime
+   DtAddHours(dt, h) DWORD           dt + h hours for h < 12, else dt - (24-h)
+                                     hours (time-zone style adjustment)
+   FmtDate / FmtDateAndTime / FmtTime(psbRet, dt)  "mm/dd/yy", "mm/dd/yy hh:mm:ss",
+                                     "hh:mm:ss" via FmtDt
+   SetNow(dt)                        SetDateTime
+   ParseField(pbRet, pb, cb, pi, chSep, fLast, min, limit) BYTE
+                                     parse the number at pb(i) up to chSep (or the
+                                     end if chSep = 0, or if fLast and no chSep);
+                                     must be min <= n < limit; stores it, advances i
+   FmtDt(psbRet, dt, fDate, fTime)   the formatter behind FmtDate.. */
+
+DECLARE ercDayAndDateDisagree LITERALLY '2702';
+DECLARE DtType LITERALLY 'STRUCTURE (seconds WORD, dayTimes2 WORD)';
+DECLARE ExpDtType LITERALLY 'STRUCTURE (year WORD, month BYTE, day BYTE,
+   dayOfWeek BYTE, hour BYTE, minute BYTE, second BYTE)';
+
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+Mul32: PROCEDURE (a, b) DWORD EXTERNAL; DECLARE (a, b) WORD; END;
+AppendSb: PROCEDURE (pDst, pSrc) EXTERNAL; DECLARE (pDst, pSrc) POINTER; END;
+AppendCh: PROCEDURE (pDst, ch) EXTERNAL; DECLARE pDst POINTER, ch BYTE; END;
+SbFromNumber: PROCEDURE (psbRet, dw, cDigits, chFill) EXTERNAL;
+   DECLARE psbRet POINTER, dw DWORD, cDigits WORD, chFill BYTE; END;
+FWFromRgch: PROCEDURE (pwRet, pb, cb) BYTE EXTERNAL;
+   DECLARE pwRet WORD, pb POINTER, cb WORD; END;
+CompactDateTime: PROCEDURE (pExpDateTime, pDateTimeRet) WORD EXTERNAL;
+   DECLARE (pExpDateTime, pDateTimeRet) POINTER; END;
+ExpandDateTime: PROCEDURE (dateTime, pExpDateTimeRet) WORD EXTERNAL;
+   DECLARE dateTime DWORD, pExpDateTimeRet POINTER; END;
+FormatDateTime: PROCEDURE (dateTime, psbTemplate, psbRet) WORD EXTERNAL;
+   DECLARE dateTime DWORD, (psbTemplate, psbRet) POINTER; END;
+GetDateTime: PROCEDURE (pDateTimeRet) WORD EXTERNAL;
+   DECLARE pDateTimeRet POINTER; END;
+SetDateTime: PROCEDURE (seconds, dayTimes2) WORD EXTERNAL;
+   DECLARE (seconds, dayTimes2) WORD; END;
+
+DtDiff: PROCEDURE (dt1, dt2) DWORD PUBLIC REENTRANT;
+   DECLARE (dt1, dt2) DWORD;
+   DECLARE t1 DtType AT (@dt1);
+   DECLARE t2 DtType AT (@dt2);
+   DECLARE dwSec DWORD;
+   IF t1.seconds >= t2.seconds THEN
+      dwSec = t1.seconds - t2.seconds;
+   ELSE DO;
+      dwSec = t1.seconds + 43200 - t2.seconds;
+      t1.dayTimes2 = t1.dayTimes2 - 1;
+   END;
+   RETURN Mul32(t1.dayTimes2 - t2.dayTimes2, 43200) + dwSec;
+END DtDiff;
+
+DtSeconds: PROCEDURE (dt) DWORD PUBLIC REENTRANT;
+   DECLARE dt DWORD;
+   DECLARE t DtType AT (@dt);
+   RETURN Mul32(t.dayTimes2, 43200) + t.seconds;
+END DtSeconds;
+
+DtAddSeconds: PROCEDURE (dt, n) DWORD PUBLIC REENTRANT;
+   DECLARE dt DWORD, n WORD;
+   DECLARE t DtType AT (@dt);
+   DECLARE dw DWORD;
+   DECLARE aw (2) WORD AT (@dw);
+   dw = DOUBLE(t.seconds) + n;
+   DO WHILE dw >= 43200;
+      dw = dw - 43200;
+      t.dayTimes2 = t.dayTimes2 + 1;
+   END;
+   t.seconds = aw(0);
+   RETURN dt;
+END DtAddSeconds;
+
+DtMidnight: PROCEDURE (dt) DWORD PUBLIC REENTRANT;
+   DECLARE dt DWORD;
+   DECLARE t DtType AT (@dt);
+   t.seconds = 0;
+   t.dayTimes2 = t.dayTimes2 AND 0FFFEH;
+   RETURN dt;
+END DtMidnight;
+
+CompactDt: PROCEDURE (pExp) DWORD PUBLIC REENTRANT;
+   DECLARE pExp POINTER;
+   DECLARE exp BASED pExp ExpDtType;
+   DECLARE dt DWORD;
+   DECLARE erc WORD;
+   IF exp.dayOfWeek = 0FFH THEN
+   DO;
+      exp.dayOfWeek = 0;
+      DO WHILE (erc := CompactDateTime(pExp, @dt)) = ercDayAndDateDisagree;
+         exp.dayOfWeek = exp.dayOfWeek + 1;
+      END;
+   END;
+   ELSE
+      erc = CompactDateTime(pExp, @dt);
+   CALL CheckErc(erc);
+   RETURN dt;
+END CompactDt;
+
+GetNow: PROCEDURE DWORD PUBLIC REENTRANT;
+   DECLARE dt DWORD;
+   CALL CheckErc(GetDateTime(@dt));
+   RETURN dt;
+END GetNow;
+
+DtSubSeconds: PROCEDURE (dt, n) DWORD PUBLIC REENTRANT;
+   DECLARE dt DWORD, n WORD;
+   DECLARE t DtType AT (@dt);
+   DECLARE dw DWORD;
+   dw = t.seconds;
+   DO WHILE n > dw;
+      dw = dw + 43200;
+      t.dayTimes2 = t.dayTimes2 - 1;
+   END;
+   t.seconds = dw - n;
+   RETURN dt;
+END DtSubSeconds;
+
+ExpandDt: PROCEDURE (pExpRet, dt) PUBLIC REENTRANT;
+   DECLARE pExpRet POINTER, dt DWORD;
+   CALL CheckErc(ExpandDateTime(dt, pExpRet));
+END ExpandDt;
+
+ParseDateTime: PROCEDURE (pDtRet, pb, cb) BYTE PUBLIC REENTRANT;
+   DECLARE pDtRet POINTER, pb POINTER, cb WORD;
+   DECLARE dtRet BASED pDtRet DWORD;
+   DECLARE expNow ExpDtType;
+   DECLARE cbDate WORD;
+   DECLARE exp ExpDtType;
+   DECLARE i WORD;
+   DECLARE bYear BYTE;
+   CALL ExpandDt(@expNow, GetNow);
+   cbDate = FINDB(pb, ' ', cb);
+   IF cbDate = 0FFFFH THEN
+      IF FINDB(pb, '/', cb) = 0FFFFH THEN
+         cbDate = 0;
+      ELSE
+         cbDate = cb;
+   i = 0;
+   IF cbDate > i THEN
+   DO;
+      IF NOT ParseField(.exp.month, pb, cbDate, .i, '/', 0, 1, 13) THEN
+         RETURN 0;
+      exp.month = exp.month - 1;
+      IF NOT ParseField(.exp.day, pb, cbDate, .i, '/', 0FFH, 1, 32) THEN
+         RETURN 0;
+      IF cbDate > i THEN
+      DO;
+         IF NOT ParseField(.bYear, pb, cbDate, .i, 0, 0FFH, 0, 100) THEN
+            RETURN 0;
+         exp.year = bYear + 1900;
+      END;
+      ELSE
+         exp.year = expNow.year;
+      IF cb > cbDate THEN
+         i = i + 1;
+   END;
+   ELSE
+   DO;
+      exp.month = expNow.month;
+      exp.day = expNow.day;
+      exp.year = expNow.year;
+   END;
+   IF cb > i THEN
+   DO;
+      IF NOT ParseField(.exp.hour, pb, cb, .i, ':', 0, 0, 24) THEN
+         RETURN 0;
+      IF NOT ParseField(.exp.minute, pb, cb, .i, ':', 0FFH, 0, 60) THEN
+         RETURN 0;
+      IF cb > i THEN
+      DO;
+         IF NOT ParseField(.exp.second, pb, cb, .i, 0, 0FFH, 0, 60) THEN
+            RETURN 0;
+      END;
+      ELSE
+         exp.second = 0;
+   END;
+   ELSE
+      exp.second, exp.minute, exp.hour = 0;
+   exp.dayOfWeek = 0FFH;
+   dtRet = CompactDt(@exp);
+   RETURN 0FFH;
+END ParseDateTime;
+
+ParseDateTimeSb: PROCEDURE (pDtRet, psb) BYTE PUBLIC REENTRANT;
+   DECLARE (pDtRet, psb) POINTER;
+   DECLARE sb BASED psb (1) BYTE;
+   RETURN ParseDateTime(pDtRet, @sb(1), sb(0));
+END ParseDateTimeSb;
+
+FmtDateTime: PROCEDURE (psbRet, dt, psbTemplate) PUBLIC REENTRANT;
+   DECLARE psbRet POINTER, dt DWORD, psbTemplate POINTER;
+   CALL CheckErc(FormatDateTime(dt, psbTemplate, psbRet));
+END FmtDateTime;
+
+DtAddHours: PROCEDURE (dt, h) DWORD PUBLIC REENTRANT;
+   DECLARE dt DWORD, h WORD;
+   IF h < 12 THEN
+      RETURN DtAddSeconds(dt, h * 3600);
+   ELSE
+      RETURN DtSubSeconds(dt, (24 - h) * 3600);
+END DtAddHours;
+
+FmtDate: PROCEDURE (psbRet, dt) PUBLIC REENTRANT;
+   DECLARE psbRet POINTER, dt DWORD;
+   CALL FmtDt(psbRet, dt, 0FFH, 0);
+END FmtDate;
+
+FmtDateAndTime: PROCEDURE (psbRet, dt) PUBLIC REENTRANT;
+   DECLARE psbRet POINTER, dt DWORD;
+   CALL FmtDt(psbRet, dt, 0FFH, 0FFH);
+END FmtDateAndTime;
+
+FmtTime: PROCEDURE (psbRet, dt) PUBLIC REENTRANT;
+   DECLARE psbRet POINTER, dt DWORD;
+   CALL FmtDt(psbRet, dt, 0, 0FFH);
+END FmtTime;
+
+SetNow: PROCEDURE (dt) PUBLIC REENTRANT;
+   DECLARE dt DWORD;
+   DECLARE t DtType AT (@dt);
+   CALL CheckErc(SetDateTime(t.seconds, t.dayTimes2));
+END SetNow;
+
+ParseField: PROCEDURE (pbRet, pb, cb, pi, chSep, fLast, min, limit) BYTE
+      PUBLIC REENTRANT;
+   DECLARE pbRet WORD, pb POINTER, cb WORD, pi WORD,
+      (chSep, fLast, min, limit) BYTE;
+   DECLARE bRet BASED pbRet BYTE;
+   DECLARE rgb BASED pb (1) BYTE;
+   DECLARE i BASED pi WORD;
+   DECLARE cbField WORD;
+   DECLARE w WORD;
+   IF chSep = 0 THEN
+      cbField = cb - i;
+   /* NB: "IF fLast THEN DO .. END; ELSE RETURN 0;" is required; the same
+      logic as "IF NOT fLast THEN RETURN 0; ..." loads i into SI instead of
+      DI (pi is not kept in SI for the later "cb - i") and the compiler then
+      cross-jumps the two "cbField = cb - i" statements. */
+   ELSE IF (cbField := FINDB(@rgb(i), chSep, cb - i)) = 0FFFFH THEN
+      IF fLast THEN
+      DO;
+         chSep = 0;
+         cbField = cb - i;
+      END;
+      ELSE
+         RETURN 0;
+   IF NOT FWFromRgch(.w, @rgb(i), cbField) THEN
+      RETURN 0;
+   IF w < min OR w >= limit THEN
+      RETURN 0;
+   bRet = w;
+   i = i + cbField;
+   IF chSep <> 0 THEN
+      i = i + 1;
+   RETURN 0FFH;
+END ParseField;
+
+FmtDt: PROCEDURE (psbRet, dt, fDate, fTime) PUBLIC REENTRANT;
+   DECLARE psbRet POINTER, dt DWORD, (fDate, fTime) BYTE;
+   DECLARE sbRet BASED psbRet (1) BYTE;
+   DECLARE exp ExpDtType;
+   DECLARE sbNum (256) BYTE;
+   CALL ExpandDt(@exp, dt);
+   sbRet(0) = 0;
+   IF fDate THEN
+   DO;
+      CALL SbFromNumber(@sbNum, exp.month + 1, 2, '0');
+      CALL AppendSb(psbRet, @sbNum);
+      CALL AppendCh(psbRet, '/');
+      CALL SbFromNumber(@sbNum, exp.day, 2, '0');
+      CALL AppendSb(psbRet, @sbNum);
+      CALL AppendCh(psbRet, '/');
+      CALL SbFromNumber(@sbNum, exp.year - 1900, 2, '0');
+      CALL AppendSb(psbRet, @sbNum);
+      IF fTime THEN
+         CALL AppendCh(psbRet, ' ');
+   END;
+   IF fTime THEN
+   DO;
+      CALL SbFromNumber(@sbNum, exp.hour, 2, '0');
+      CALL AppendSb(psbRet, @sbNum);
+      CALL AppendCh(psbRet, ':');
+      CALL SbFromNumber(@sbNum, exp.minute, 2, '0');
+      CALL AppendSb(psbRet, @sbNum);
+      CALL AppendCh(psbRet, ':');
+      CALL SbFromNumber(@sbNum, exp.second, 2, '0');
+      CALL AppendSb(psbRet, @sbNum);
+   END;
+END FmtDt;
+END DateTime;

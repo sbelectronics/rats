@@ -1,0 +1,417 @@
+$MEDIUM OPTIMIZE(2)
+RatsA: DO;
+
+DECLARE FOREVER LITERALLY 'WHILE 1',
+        TRUE LITERALLY '0FFH', FALSE LITERALLY '0';
+
+DECLARE ObjType LITERALLY 'STRUCTURE (link WORD, delay BYTE, ctr BYTE,
+        type BYTE, size BYTE, b6 BYTE, dir BYTE, flags BYTE, b9 BYTE,
+        wA WORD, wC WORD, wE WORD)';
+
+/* ---- externals: other Rats modules ---- */
+InitGame: PROCEDURE EXTERNAL; END;
+PollKeyboard: PROCEDURE EXTERNAL; END;
+UpdateClock: PROCEDURE EXTERNAL; END;
+UpdateStatus: PROCEDURE EXTERNAL; END;
+AddScore: PROCEDURE (w) EXTERNAL; DECLARE w WORD; END;
+EndLevel: PROCEDURE (f) EXTERNAL; DECLARE f BYTE; END;
+NewPlayer: PROCEDURE (pos, b9, flags, fNew) EXTERNAL;
+   DECLARE pos WORD, (b9, flags, fNew) BYTE; END;
+NewGhost: PROCEDURE (pos, size, b6, flags, bMap, w14, pOwner, fKind) EXTERNAL;
+   DECLARE pos WORD, (size, b6, flags, bMap) BYTE, (w14, pOwner) WORD, fKind BYTE; END;
+/* ---- externals: libraries ---- */
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+Sleep: PROCEDURE (n) EXTERNAL; DECLARE n BYTE; END;
+Random: PROCEDURE (n) WORD EXTERNAL; DECLARE n WORD; END;
+VidPutChars: PROCEDURE (col, row, cnt, pb, attr) EXTERNAL;
+   DECLARE (col, row, cnt) WORD, pb POINTER, attr BYTE; END;
+SetScreenVidAttr: PROCEDURE (iAttr, fOn) WORD EXTERNAL;
+   DECLARE (iAttr, fOn) WORD; END;
+
+/* ---- externals: data ---- */
+DECLARE
+   tickCount WORD EXTERNAL,
+   rgpHandler (8) POINTER EXTERNAL,
+   rgbDir (4) BYTE EXTERNAL,             /* 0004 */
+   rgbAnim (4) BYTE EXTERNAL,            /* 000C */
+   rgbKind (8) BYTE EXTERNAL,            /* 0010 */
+   tRespawn WORD EXTERNAL,               /* 00EC */
+   rgpDraw (5) POINTER EXTERNAL,         /* 0658 */
+   rgpErase (5) POINTER EXTERNAL,        /* 066C */
+   tLastPlayer WORD EXTERNAL,            /* 1234 */
+   pCur WORD EXTERNAL,                   /* 1236 */
+   posCur WORD EXTERNAL,                 /* 1238 */
+   bPlayerB9 BYTE EXTERNAL,              /* 123A */
+   bPlayerFlags BYTE EXTERNAL,           /* 123B */
+   wDemolition WORD EXTERNAL,            /* 1240 */
+   fCrazyRats BYTE EXTERNAL,
+   fRandomizeOnDeath BYTE EXTERNAL,
+   fLeaveGhosts BYTE EXTERNAL,
+   bLeftHanded BYTE EXTERNAL,
+   fForever BYTE EXTERNAL,
+   wViewW WORD EXTERNAL,                 /* 134C */
+   wViewH WORD EXTERNAL,                 /* 134E */
+   pMap POINTER EXTERNAL,                /* 1352 */
+   map BASED pMap (1) BYTE,
+   posView WORD EXTERNAL,                /* 1356 */
+   rgbView (4) BYTE EXTERNAL,
+   bView2X BYTE EXTERNAL, bView2Y BYTE EXTERNAL, /* 1356,1357 */
+   rgObj (256) ObjType EXTERNAL,         /* 135A */
+   rgPos (1024) WORD EXTERNAL,           /* 235A */
+   rgHead (16) WORD EXTERNAL,            /* 2B5A */
+   rgTail (16) WORD EXTERNAL,            /* 2B7A */
+   iWheel WORD EXTERNAL,                 /* 2B9A */
+   pFree WORD EXTERNAL,                  /* 2B9C */
+   pPlayer WORD EXTERNAL,                /* 2B9E */
+   posPlayer WORD EXTERNAL,              /* 2BA0 */
+   bPlayerX BYTE EXTERNAL, bPlayerY BYTE EXTERNAL,
+   ptPlayer STRUCTURE (x BYTE, y BYTE) EXTERNAL,
+   cRatsDead WORD EXTERNAL, cRatsLeft WORD EXTERNAL,
+   cCrazyDead WORD EXTERNAL, cCrazyLeft WORD EXTERNAL,
+   cFactDead WORD EXTERNAL, cFactLeft WORD EXTERNAL,
+   cDeaths WORD EXTERNAL, cLives WORD EXTERNAL,
+   wFactValue WORD EXTERNAL,
+   tClock WORD EXTERNAL,
+   wScrW WORD EXTERNAL, wScrH WORD EXTERNAL,  /* 2BC2, 2BC4 */
+   bFlash BYTE EXTERNAL,                 /* 2BC6 */
+
+   cScrLines WORD EXTERNAL;               /* 2F24 */
+
+Main: PROCEDURE PUBLIC;
+   CALL InitGame;
+   DO FOREVER;
+      CALL RunTick;
+      CALL Sleep(2);
+   END;
+END Main;
+
+RunTick: PROCEDURE PUBLIC REENTRANT;
+   DECLARE obj BASED pCur ObjType;
+   DECLARE pProc POINTER, wUnused WORD;
+   CALL UpdatePlayer;
+   CALL ScrollView;
+   CALL PollKeyboard;
+   DO WHILE (pCur := rgHead(iWheel)) <> .rgHead(iWheel);
+      rgHead(iWheel) = obj.link;
+      IF rgTail(iWheel) = pCur THEN rgTail(iWheel) = obj.link;
+      obj.link = 0;
+      posCur = rgPos(SHR(.obj - .rgObj, 2));
+      pProc = rgpHandler(obj.type);
+      CALL pProc(posCur, .obj);
+   END;
+   iWheel = (iWheel + 1) AND 0FH;
+   IF tClock <> tickCount THEN CALL UpdateClock;
+END RunTick;
+
+MoveCur: PROCEDURE (pos) PUBLIC REENTRANT;
+   DECLARE pos WORD;
+   DECLARE obj BASED pCur ObjType;
+   DECLARE (pTail, w) WORD, pProc POINTER, pHit WORD;
+   DECLARE hit BASED pHit ObjType, tail BASED pTail ObjType;
+   IF obj.link <> 0 THEN CALL CheckErc(577H);
+   IF pos <> posCur THEN
+   DO;
+      IF map(pos) <> 0 THEN
+      DO;
+         pHit = FindObjAt(pos);
+         IF pHit <> pCur THEN
+         DO;
+            CALL KillObj(pCur);
+            IF pHit = 0 THEN
+            DO;
+               IF wDemolition <> 0 THEN
+                  IF Random(0) < wDemolition THEN map(pos) = 0;
+            END;
+            ELSE IF hit.type < 6 THEN CALL KillObj(pHit);
+            RETURN;
+         END;
+      END;
+      pProc = rgpErase(obj.size);
+      CALL pProc(posCur);
+      posCur = pos;
+   END;
+   CALL DrawObj(posCur, .obj);
+   w = (obj.delay + iWheel) AND 0FH;
+   pTail = rgTail(w);
+   obj.link = tail.link;
+   tail.link = pCur;
+   rgTail(w) = pCur;
+END MoveCur;
+
+DrawObj: PROCEDURE (pos, p) PUBLIC REENTRANT;
+   DECLARE (pos, p) WORD;
+   DECLARE obj BASED p ObjType;
+   DECLARE pProc POINTER, ch BYTE, b BYTE;
+   DO CASE obj.type;
+      DO;
+         IF (obj.flags AND 40H) <> 0 THEN b = rgbAnim(obj.ctr AND 3);
+         ELSE b = 8;
+         ch = SHL(rgbDir(obj.dir), 1) + 0C0H + b;
+      END;
+      ch = SHL(obj.ctr AND 1, 2) + 80H;
+      ch = rgbDir(obj.dir) + 0A0H + 1;
+      ch = rgbDir(obj.dir) + 0A0H + SHL(obj.ctr AND 1, 2);
+      ch = SHL(obj.dir, 1) + 90H + (obj.ctr AND 1);
+      DO;
+         IF obj.ctr < 0F0H THEN bFlash = 10H;
+         ch = obj.dir + 88H;
+      END;
+      DO;
+         bFlash = 10H;
+         IF (obj.flags AND 20H) <> 0 THEN
+            CALL CheckErc(SetScreenVidAttr(0, (obj.ctr AND 1) <> 0));
+         IF obj.size = 1 THEN ch = (obj.ctr AND 1) + 18H;
+         ELSE IF obj.size = 2 THEN ch = SHL(obj.ctr AND 1, 2) + 11H;
+         ELSE ch = SHL(obj.ctr AND 1, 2) + 10H;
+      END;
+      DO;
+         bFlash = 10H;
+         ch = SHL(obj.ctr AND 1, 2) + rgbKind(obj.dir);
+      END;
+   END;
+   pProc = rgpDraw(obj.size);
+   CALL pProc(ch, pos, .rgPos(SHR(.obj - .rgObj, 2)));
+   obj.ctr = obj.ctr + 1;
+   IF obj.ctr = 0 THEN obj.ctr = 0F0H;
+END DrawObj;
+
+KillObj: PROCEDURE (p) PUBLIC REENTRANT;
+   DECLARE p WORD;
+   DECLARE obj BASED p ObjType;
+   DECLARE pos WORD;
+   DECLARE save ObjType;
+   DECLARE w14 WORD, w16 WORD, i WORD, s WORD, w1C WORD, w1E WORD,
+           w20 WORD, w22 WORD, bMap BYTE, fKind BYTE;
+   DECLARE q BASED w16 ObjType, owner BASED w1C ObjType;
+   pos = rgPos(SHR(.obj - .rgObj, 2));
+   bMap = 0;
+   IF obj.type = 0 THEN
+      IF fRandomizeOnDeath THEN
+         IF fLeaveGhosts THEN bMap = map(pos);
+   CALL FreeObj(.save, .obj);
+   fKind = TRUE;
+   w14 = 0;
+   DO CASE save.type;
+      DO;
+         cDeaths = cDeaths + 1;
+         IF fForever THEN cLives = cLives + 1;
+         IF p = pPlayer THEN
+         DO;
+            pPlayer = 0;
+            bPlayerB9 = save.dir;
+            bPlayerFlags = save.flags;
+            tLastPlayer = tickCount;
+         END;
+         ELSE IF fForever THEN fKind = FALSE;
+      END;
+      DO;
+         CALL AddScore(wFactValue - save.wC);
+         cFactDead = cFactDead + 1;
+         cFactLeft = cFactLeft - 1;
+         w16 = .rgObj;
+         i = 0;
+         DO WHILE i < 256;
+            IF q.wE = p THEN q.wE = 0;
+            w16 = w16 + 16;
+            i = i + 1;
+         END;
+         IF fForever THEN fKind = 1;
+      END;
+      DO;
+         save.flags = save.flags AND 0EFH;
+         GOTO case34;
+      END;
+      GOTO case34;
+case34:
+      DO;
+         IF (save.flags AND 10H) <> 0 THEN
+         DO;
+            w1E = save.wC / 25;
+            w20 = save.wC MOD 25;
+            w22 = w1E * 5;
+            s = w20 + w22;
+            w14 = w22;
+         END;
+         ELSE s = save.wC;
+         w1C = save.wE;
+         IF w1C <> 0 THEN owner.wC = owner.wC + s;
+         ELSE IF fCrazyRats THEN s = SHR(s, 1);
+         CALL AddScore(s);
+         IF save.type = 4 THEN
+         DO;
+            cCrazyDead = cCrazyDead + 1;
+            cCrazyLeft = cCrazyLeft - 1;
+         END;
+         ELSE
+         DO;
+            cRatsDead = cRatsDead + 1;
+            cRatsLeft = cRatsLeft - 1;
+         END;
+      END;
+      ;
+      RETURN;
+      RETURN;
+   END;
+   CALL UpdateStatus;
+   CALL NewGhost(pos, save.size, save.b6, save.flags AND 30H, bMap, w14,
+                 save.wE, fKind);
+END KillObj;
+
+FindObjAt: PROCEDURE (pos) WORD PUBLIC REENTRANT;
+   DECLARE pos WORD;
+   DECLARE i WORD, k WORD, p WORD;
+   DECLARE obj BASED p ObjType;
+   i = 0;
+   DO WHILE (k := FINDW(@rgPos(i), pos, 400H - i)) <> 0FFFFH;
+      i = i + k;
+      p = SHL(i AND 0FFFCH, 2) + .rgObj;
+      IF obj.size > (i AND 3) THEN RETURN p;
+      i = i + 1;
+   END;
+   RETURN 0;
+END FindObjAt;
+
+UpdatePlayer: PROCEDURE PUBLIC REENTRANT;
+   DECLARE pos WORD, p WORD, i WORD;
+   DECLARE obj BASED p ObjType;
+   IF bFlash <> 0 THEN bFlash = bFlash - 1;
+   IF cFactLeft = 0 AND cRatsLeft = 0 AND cCrazyLeft = 0 AND cFactDead <> 0
+      AND bFlash = 0 THEN CALL EndLevel(0);
+   IF pPlayer = 0 THEN
+   DO;
+      IF tickCount - tLastPlayer >= tRespawn THEN
+      DO;
+         IF cLives <> 0 THEN
+         DO;
+            IF fRandomizeOnDeath THEN pos = RandomCell;
+            ELSE pos = posPlayer;
+            IF IsFree(pos, 4) THEN
+               CALL NewPlayer(pos, bPlayerB9, bPlayerFlags AND 29H, TRUE);
+         END;
+         ELSE
+         DO;
+            p = .rgObj;
+            i = 0;
+            DO WHILE i < 256;
+               IF obj.type = 0 THEN
+               DO;
+                  pPlayer = p;
+                  obj.flags = (obj.flags AND 0F7H) OR (bLeftHanded AND 8);
+                  GOTO found;
+               END;
+               p = p + 16;
+               i = i + 1;
+            END;
+            IF bFlash = 0 THEN CALL EndLevel(1);
+         END;
+      END;
+   END;
+found:
+   IF pPlayer <> 0 THEN
+   DO;
+      posPlayer = rgPos(SHR(pPlayer - .rgObj, 2));
+      rgbView(2) = bPlayerX + 1 - SHR(wViewW, 1);
+      rgbView(3) = bPlayerY + 1 - SHR(wViewH, 1);
+      rgbView(0) = ptPlayer.x + 1 - SHR(wScrW, 1);
+      rgbView(1) = ptPlayer.y + 1 - SHR(wScrH, 1);
+   END;
+END UpdatePlayer;
+
+ScrollView: PROCEDURE PUBLIC REENTRANT;
+   DECLARE pos WORD, bp(2) BYTE AT (@pos);
+   DECLARE i WORD, b BYTE;
+   pos = posView;
+   b = 256 - bp(0);
+   IF b >= wScrW THEN
+   DO;
+      i = 2;
+      DO WHILE i < cScrLines;
+         CALL VidPutChars(0, i, wScrW, @map(pos), 0);
+         bp(1) = bp(1) + 1;
+         i = i + 1;
+      END;
+   END;
+   ELSE
+   DO;
+      i = 2;
+      DO WHILE i < cScrLines;
+         CALL VidPutChars(0, i, b, @map(pos), 0);
+         CALL VidPutChars(b, i, wScrW - b, @map(pos AND 0FF00H), 0);
+         bp(1) = bp(1) + 1;
+         i = i + 1;
+      END;
+   END;
+END ScrollView;
+
+RandomCell: PROCEDURE WORD PUBLIC REENTRANT;
+   DECLARE pos WORD, bp(2) BYTE AT (@pos);
+   bp(0) = (Random(0) AND 0F0H) + 7;
+   bp(1) = (Random(0) AND 0F8H) + 4;
+   RETURN pos;
+END RandomCell;
+
+IsFree: PROCEDURE (pos, size) BYTE PUBLIC REENTRANT;
+   DECLARE pos WORD, size BYTE;
+   DECLARE bp(2) BYTE AT (@pos);
+   DECLARE b BYTE;
+   b = map(pos);
+   IF size > 1 THEN
+   DO;
+      bp(0) = bp(0) + 1;
+      b = b OR map(pos);
+      bp(1) = bp(1) + 1;
+      b = b OR map(pos);
+      bp(0) = bp(0) - 1;
+      b = b OR map(pos);
+      bp(1) = bp(1) - 1;
+   END;
+   RETURN b = 0;
+END IsFree;
+
+NewObj: PROCEDURE (pTmpl, pos, delay) WORD PUBLIC REENTRANT;
+   DECLARE (pTmpl, pos) WORD, delay BYTE;
+   DECLARE p WORD, w WORD, pTail WORD;
+   DECLARE obj BASED p ObjType, tmpl BASED pTmpl ObjType, tail BASED pTail ObjType;
+   IF pFree = 0 THEN RETURN 0;
+   p = pFree;
+   pFree = obj.link;
+   CALL MOVB(@tmpl, @obj, 16);
+   CALL DrawObj(pos, .obj);
+   DO WHILE obj.delay <= delay;
+      delay = delay - obj.delay;
+   END;
+   w = (delay + iWheel + 1) AND 0FH;
+   pTail = rgTail(w);
+   obj.link = tail.link;
+   tail.link = p;
+   rgTail(w) = p;
+   RETURN p;
+END NewObj;
+
+FreeObj: PROCEDURE (pDest, p) PUBLIC REENTRANT;
+   DECLARE (pDest, p) WORD;
+   DECLARE obj BASED p ObjType, dest BASED pDest ObjType;
+   DECLARE pProc POINTER, q WORD, k WORD;
+   DECLARE qq BASED q ObjType;
+   CALL MOVB(@obj, @dest, 16);
+   pProc = rgpErase(obj.size);
+   CALL pProc(rgPos(SHR(.obj - .rgObj, 2)));
+   IF obj.link <> 0 THEN
+   DO;
+      q = p;
+      DO WHILE qq.link <> p;
+         q = qq.link;
+      END;
+      qq.link = obj.link;
+      k = FINDW(@rgTail, p, 16);
+      IF k <> 0FFFFH THEN rgTail(k) = obj.link;
+      obj.link = 0;
+   END;
+   obj.type = 0FFH;
+   obj.size = 0;
+   obj.link = pFree;
+   pFree = p;
+END FreeObj;
+
+CALL Main;
+END RatsA;

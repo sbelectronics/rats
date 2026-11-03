@@ -1,0 +1,111 @@
+$MEDIUM OPTIMIZE(1)
+Maze: DO;
+/* GenMaze: random maze generator (Eller's algorithm, one row at a time).
+   The maze has w columns and h rows of cells.  Walls are reported through
+   the callback  pProc(x, y, fHoriz):  fHoriz = TRUE: horizontal wall on top
+   of cell (x,y);  FALSE: vertical wall on the left of cell (x,y).
+   set(x) is the set (connected region) of cell x in the current row;
+   nextSet is the next unused set number.  Between two cells of a row a
+   wall is put with probability density/65536, but always between cells of
+   the same set (except in the last row); otherwise the two sets are
+   merged.  Below the row a cell gets a wall (and a new set) with the same
+   probability, unless it is the last cell of its set.
+   Border modes (top, left, right, bottom): 0 = solid wall,
+   1 = random, 2 = random (top/left) resp. open (right/bottom). */
+
+Random: PROCEDURE (n) WORD EXTERNAL; DECLARE n WORD; END;
+
+GenMaze: PROCEDURE (w, h, modeLeft, modeRight, modeTop, modeBottom,
+      density, pProc) PUBLIC REENTRANT;
+   DECLARE w WORD, h WORD, modeLeft BYTE, modeRight BYTE, modeTop BYTE,
+      modeBottom BYTE, density WORD, pProc POINTER;
+   DECLARE set (256) WORD;
+   DECLARE nextSet WORD;
+   DECLARE y WORD;
+   DECLARE x WORD;
+   DECLARE sTo WORD;
+   DECLARE sFrom WORD;
+   DECLARE j WORD;
+   DECLARE sOld WORD;
+   DECLARE fWall BYTE;
+
+   /* top border; every cell of the first row is its own set */
+   x = 0;
+   DO WHILE x < w;
+      DO CASE modeTop;
+         fWall = 0FFH;
+         fWall = Random(0) < density;
+         fWall = Random(0) < density;
+      END;
+      IF fWall THEN CALL pProc(x, DOUBLE(0), 0FFH);
+      set(x) = x;
+      x = x + 1;
+   END;
+   nextSet = w;
+   y = 0;
+   DO WHILE y < h;
+      DO CASE modeLeft;
+         fWall = 0FFH;
+         fWall = Random(0) < density;
+         fWall = Random(0) < density;
+      END;
+      IF fWall THEN CALL pProc(DOUBLE(0), y, 0);
+      /* vertical walls inside the row */
+      x = 0;
+      DO WHILE x < w - 1;
+         IF Random(0) < density AND (y < h - 1 OR set(x) = set(x + 1)) THEN
+            CALL pProc(x + 1, y, 0);
+         ELSE
+         DO;   /* no wall: merge set(x+1) into set(x) */
+            sFrom = set(x + 1);
+            sTo = set(x);
+            j = 0;
+            DO WHILE j < w;
+               IF set(j) = sFrom THEN set(j) = sTo;
+               j = j + 1;
+            END;
+         END;
+         x = x + 1;
+      END;
+      DO CASE modeRight;
+         fWall = 0FFH;
+         fWall = Random(0) < density;
+         fWall = 0;
+      END;
+      IF fWall THEN CALL pProc(w, y, 0);
+      /* horizontal walls below the row */
+      IF y < h - 1 THEN
+      DO;
+         x = 0;
+         DO WHILE x < w;
+            IF Random(0) < density THEN
+            DO;
+               sOld = set(x);
+               set(x) = nextSet;
+               IF FINDW(@set, sOld, w) = 0FFFFH THEN
+                  set(x) = sOld;   /* last cell of its set: keep open */
+               ELSE
+               DO;
+                  CALL pProc(x, y + 1, 0FFH);
+                  nextSet = nextSet + 1;
+               END;
+            END;
+            x = x + 1;
+         END;
+      END;
+      y = y + 1;
+   END;
+   /* bottom border */
+   x = 0;
+   DO WHILE x < w;
+      DO CASE modeBottom;
+         fWall = 0FFH;
+         fWall = Random(0) < density;
+         fWall = 0;
+      END;
+      IF fWall THEN CALL pProc(x, h, 0FFH);
+      x = x + 1;
+   END;
+END GenMaze;
+
+END Maze;

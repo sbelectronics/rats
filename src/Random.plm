@@ -1,0 +1,108 @@
+$MEDIUM OPTIMIZE(2)
+/* Random: pseudo random numbers (image 577C-591A).
+   Additive lagged Fibonacci generator x(i) = x(i) + x(i-13) over a ring
+   of 33 words, seeded from the date/time.
+   GetRandomSeed   DWORD seed derived from GetDateTime
+   GetRandomCount  number of Random calls since seeding (DWORD)
+   SeedRandom(dw)  reset the ring to the initial table and run it dw times
+                   (dw = 0FFFFFFFFh: use GetRandomSeed)
+   Random(n)       next number scaled to 0..n-1 (n = 0: raw 16-bit value)
+   RandomWeighted(pw, n)  random index 0..n-1 weighted by the words pw(i)
+   CONST = DGROUP 0C96-0CDB, DATA = DGROUP 2CB8-2D00.                   */
+Random: DO;
+
+DECLARE TRUE LITERALLY '0FFH', FALSE LITERALLY '0',
+        cRing LITERALLY '33', cLag LITERALLY '13';
+
+/* ---- CONST (DGROUP 0C96..) ---- */
+DECLARE dwNil DWORD PUBLIC DATA (0FFFFFFFFH),   /* 0C96, also used by ErrMsg */
+        rgwInitRing (cRing) WORD DATA (                            /* 0C9A */
+          32FFH, 0B29DH, 0C936H, 43C5H, 4980H, 0CC05H, 0B4EDH, 98B7H,
+          0E893H, 0F24BH, 2CA4H, 7FFAH, 0AE2CH, 6FF9H, 3D1CH, 66BEH,
+          0CD4DH, 8A25H, 3917H, 3D94H, 98FDH, 1502H, 0FDE1H, 0B7B7H,
+          0DCCH, 8D75H, 4B65H, 0BB22H, 22F0H, 8839H, 47F8H, 38ADH,
+          0E0CDH);
+
+/* ---- DATA (DGROUP 2CB8..) ---- */
+DECLARE rgwRing (cRing) WORD,          /* 2CB8 */
+        iRing WORD,                    /* 2CFA */
+        dwCalls DWORD,                /* 2CFC */
+        fSeeded BYTE;                  /* 2D00 */
+
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+Mul32: PROCEDURE (a, b) DWORD EXTERNAL; DECLARE (a, b) WORD; END;
+GetDateTime: PROCEDURE (pDateTimeRet) WORD EXTERNAL;
+   DECLARE pDateTimeRet POINTER; END;
+
+GetRandomSeed: PROCEDURE DWORD PUBLIC REENTRANT;
+   DECLARE dwSeed DWORD, abSeed (4) BYTE AT (@dwSeed);
+   DECLARE dt DWORD, abDt (4) BYTE AT (@dt);
+   CALL CheckErc(GetDateTime(@dt));
+   abSeed(0) = abDt(1) XOR abDt(2);
+   abSeed(1) = abDt(0) XOR abDt(3);
+   abSeed(3), abSeed(2) = 0;
+   RETURN dwSeed;
+END GetRandomSeed;
+
+GetRandomCount: PROCEDURE DWORD PUBLIC REENTRANT;
+   RETURN dwCalls;
+END GetRandomCount;
+
+SeedRandom: PROCEDURE (dwSeed) PUBLIC REENTRANT;
+   DECLARE dwSeed DWORD;
+   DECLARE wDummy WORD;
+   IF dwSeed = dwNil THEN
+      dwSeed = GetRandomSeed;
+   CALL MOVW(@rgwInitRing, @rgwRing, cRing);
+   iRing = 0;
+   fSeeded = TRUE;
+   dwCalls = 0;
+   DO WHILE dwSeed <> 0;
+      wDummy = Random(0);
+      dwSeed = dwSeed - 1;
+   END;
+END SeedRandom;
+
+Random: PROCEDURE (n) WORD PUBLIC REENTRANT;
+   DECLARE n WORD;
+   DECLARE iLag WORD;
+   DECLARE w WORD;
+   DECLARE dw DWORD, awDw (2) WORD AT (@dw);
+   IF NOT fSeeded THEN
+      CALL SeedRandom(GetRandomSeed);
+   IF iRing >= cLag THEN
+      iLag = iRing - cLag;
+   ELSE
+      iLag = iRing + cRing - cLag;
+   rgwRing(iRing), w = rgwRing(iRing) + rgwRing(iLag);
+   IF (iRing := iRing + 1) = cRing THEN
+      iRing = 0;
+   dwCalls = dwCalls + 1;
+   IF n = 0 THEN
+      RETURN w;
+   dw = Mul32(w, n);
+   RETURN awDw(1);
+END Random;
+
+RandomWeighted: PROCEDURE (pw, n) WORD PUBLIC REENTRANT;
+   DECLARE (pw, n) WORD;
+   DECLARE aw BASED pw (1) WORD;
+   DECLARE wSum WORD;
+   DECLARE i WORD;
+   DECLARE r WORD;
+   i, wSum = 0;
+   DO WHILE i < n;
+      wSum = wSum + aw(i);
+      i = i + 1;
+   END;
+   r = Random(wSum);
+   i = 0;
+   DO WHILE 1;
+      IF aw(i) > r THEN
+         RETURN i;
+      r = r - aw(i);
+      i = i + 1;
+   END;
+END RandomWeighted;
+
+END Random;

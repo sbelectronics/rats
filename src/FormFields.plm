@@ -1,0 +1,144 @@
+$MEDIUM OPTIMIZE(2)
+/* FormFields: field-type procedures for the Forms runtime (image 5286-54E4,
+   frame 528).  They are only reached through the far pointers in the form
+   descriptors (options form DGROUP 0680.., score form 0A92..): every field
+   has a format proc  Fmt(pOut, pValue)  that turns the value in the
+   caller's record into a string (text fields) or a choice value (choice
+   fields), and a parse proc  Parse(pValue, pIn) WORD  that converts back
+   and returns 0 or a forms erc (31002 not Yes/No, 31003 invalid number,
+   31004 number out of range, 31005 string too long).
+     FmtSb / ParseSb          plain string copy (FmtSb2/FmtSb3 identical)
+     ParseSb12 / ParseSb92    string copy limited to 12 / 92 characters
+     FmtBool / ParseBool      BOOLEAN <-> choice value 1 (Yes) / 0 (No)
+     FmtByte / ParseByte      BYTE number
+     FmtNumber / ParseNumber  WORD number
+     FmtDword / ParseDword    DWORD number
+   CONST (DGROUP 0C7C): rgfBool, choice value -> BOOLEAN.
+   (Length checks compare at WORD width, hence DOUBLE()/LENGTH().)      */
+FormFields: DO;
+
+DECLARE rgfBool (2) BYTE DATA (0, 0FFH);
+
+CopySb: PROCEDURE (pDst, pSrc) EXTERNAL; DECLARE (pDst, pSrc) POINTER; END;
+FDwFromSb: PROCEDURE (pdwRet, psb) BYTE EXTERNAL;
+   DECLARE pdwRet WORD, psb POINTER; END;
+SbFromNumber: PROCEDURE (psbRet, dw, cDigits, chFill) EXTERNAL;
+   DECLARE psbRet POINTER, dw DWORD, cDigits WORD, chFill BYTE; END;
+TrimSb: PROCEDURE (psb, fLeading, fTrailing) EXTERNAL;
+   DECLARE psb POINTER, (fLeading, fTrailing) BYTE; END;
+
+FmtSb: PROCEDURE (pOut, pIn) PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE sbOut BASED pOut BYTE, sbIn BASED pIn BYTE;
+   CALL CopySb(@sbOut, @sbIn);
+END FmtSb;
+
+ParseSb: PROCEDURE (pOut, pIn) WORD PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE sbOut BASED pOut BYTE, sbIn BASED pIn BYTE;
+   CALL CopySb(@sbOut, @sbIn);
+   RETURN 0;
+END ParseSb;
+
+FmtSb2: PROCEDURE (pOut, pIn) PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE sbOut BASED pOut BYTE, sbIn BASED pIn BYTE;
+   CALL CopySb(@sbOut, @sbIn);
+END FmtSb2;
+
+ParseSb12: PROCEDURE (pOut, pIn) WORD PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE sbOut BASED pOut BYTE, sbIn BASED pIn BYTE;
+   IF DOUBLE(sbIn) > 12 THEN RETURN 31005;
+   CALL CopySb(@sbOut, @sbIn);
+   RETURN 0;
+END ParseSb12;
+
+FmtSb3: PROCEDURE (pOut, pIn) PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE sbOut BASED pOut BYTE, sbIn BASED pIn BYTE;
+   CALL CopySb(@sbOut, @sbIn);
+END FmtSb3;
+
+ParseSb92: PROCEDURE (pOut, pIn) WORD PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE sbOut BASED pOut BYTE, sbIn BASED pIn BYTE;
+   IF DOUBLE(sbIn) > 92 THEN RETURN 31005;
+   CALL CopySb(@sbOut, @sbIn);
+   RETURN 0;
+END ParseSb92;
+
+FmtBool: PROCEDURE (pOut, pIn) PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE bOut BASED pOut BYTE, fIn BASED pIn BYTE;
+   IF fIn THEN bOut = 1; ELSE bOut = 0;
+END FmtBool;
+
+ParseBool: PROCEDURE (pOut, pIn) WORD PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE fOut BASED pOut BYTE, bIn BASED pIn BYTE;
+   IF bIn >= LENGTH(rgfBool) THEN RETURN 31002;
+   fOut = rgfBool(bIn);
+   RETURN 0;
+END ParseBool;
+
+FmtByte: PROCEDURE (pOut, pIn) PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE sbOut BASED pOut BYTE, bIn BASED pIn BYTE;
+   CALL SbFromNumber(@sbOut, DOUBLE(bIn), 0, ' ');
+END FmtByte;
+
+ParseByte: PROCEDURE (pOut, pIn) WORD PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE bOut BASED pOut BYTE, sbIn BASED pIn BYTE;
+   DECLARE dw DWORD;
+   DECLARE ab (4) BYTE AT (@dw), aw (2) WORD AT (@dw);
+   CALL TrimSb(@sbIn, 0FFH, 0FFH);
+   IF sbIn = 0 THEN bOut = 0;
+   ELSE
+   DO;
+      IF NOT FDwFromSb(.dw, @sbIn) THEN RETURN 31003;
+      IF ab(1) <> 0 OR aw(1) <> 0 THEN RETURN 31004;
+      bOut = ab(0);
+   END;
+   RETURN 0;
+END ParseByte;
+
+FmtNumber: PROCEDURE (pOut, pIn) PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE sbOut BASED pOut BYTE, wIn BASED pIn WORD;
+   CALL SbFromNumber(@sbOut, DOUBLE(wIn), 0, ' ');
+END FmtNumber;
+
+ParseNumber: PROCEDURE (pOut, pIn) WORD PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE wOut BASED pOut WORD, sbIn BASED pIn BYTE;
+   DECLARE dw DWORD;
+   DECLARE aw (2) WORD AT (@dw);
+   CALL TrimSb(@sbIn, 0FFH, 0FFH);
+   IF sbIn = 0 THEN wOut = 0;
+   ELSE
+   DO;
+      IF NOT FDwFromSb(.dw, @sbIn) THEN RETURN 31003;
+      IF aw(1) <> 0 THEN RETURN 31004;
+      wOut = aw(0);
+   END;
+   RETURN 0;
+END ParseNumber;
+
+FmtDword: PROCEDURE (pOut, pIn) PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE sbOut BASED pOut BYTE, dwIn BASED pIn DWORD;
+   CALL SbFromNumber(@sbOut, dwIn, 0, ' ');
+END FmtDword;
+
+ParseDword: PROCEDURE (pOut, pIn) WORD PUBLIC REENTRANT;
+   DECLARE (pOut, pIn) WORD;
+   DECLARE dwOut BASED pOut DWORD, sbIn BASED pIn BYTE;
+   CALL TrimSb(@sbIn, 0FFH, 0FFH);
+   IF sbIn = 0 THEN dwOut = 0;
+   ELSE IF NOT FDwFromSb(.dwOut, @sbIn) THEN RETURN 31003;
+   RETURN 0;
+END ParseDword;
+
+END FormFields;

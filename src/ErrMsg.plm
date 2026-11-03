@@ -1,0 +1,205 @@
+$MEDIUM OPTIMIZE(2)
+/* ErrMsg: error code -> message text (image 591A-5CD2).
+   Messages can be stored in a scratch file [scr]<$>Erc.tmp in 16-byte
+   paragraphs; such a message is identified by the pseudo error code
+   8000h OR paragraph number.  The file is accessed through one cached
+   512-byte sector buffer.
+   StoreMsg(psb) WORD      store sb in the file, return 8000h+para (0 if empty)
+   GetErcMsg(psbRet, erc)  0 -> empty; 8000h+para -> stored text; else
+                           built-in text or 'erc = <n>'
+   GetStdErcMsg(psbRet, erc)  built-in table text or 'erc = <n>'
+   OpenMsgFile             create/open Erc.tmp, reset the cache
+   WriteMsg(pb, para)      copy sb pb into the file at para*16
+   ReadMsg(psbRet, para)   read sb from the file at para*16
+   LoadSector(lfa)         make buffer hold the sector at lfa (write back
+                           a dirty buffer first, extending the file)
+   CONST = DGROUP 0CDC-0D7F, DATA = DGROUP 2D02-2F0E.                    */
+ErrMsg: DO;
+
+DECLARE TRUE LITERALLY '0FFH', FALSE LITERALLY '0',
+        cbSector LITERALLY '200H';
+
+/* ---- CONST (DGROUP 0CDC..) ---- */
+DECLARE rgbFileSpec (*) BYTE DATA ('[scr]<$>Erc.tmp'),          /* 0CDC */
+        sbErcEq (*) BYTE DATA (6, 'erc = '),                     /* 0CEB */
+        /* entries: erc WORD, sb; terminated by erc 0 */
+        rgbErcTab (*) BYTE DATA (                                /* 0CF2 */
+           5, 0, 12, 'Syntax error',
+           0CAH, 0, 14, 'Directory full',
+           0CBH, 0, 12, 'No such file',
+           0CCH, 0, 17, 'No such directory',
+           0CDH, 0, 12, 'Bad filespec',
+           0D7H, 0, 14, 'No such volume',
+           0DBH, 0, 13, 'Access denied',
+           0DCH, 0, 11, 'File in use',
+           0E6H, 0, 9, 'Disk full',
+           0, 0);
+
+/* ---- DATA (DGROUP 2D02..) ---- */
+DECLARE fh WORD INITIAL (0FFFFH),      /* 2D02 0FFFFh = not open */
+        lfaFileEnd DWORD,              /* 2D04 file length */
+        rgwSector (100H) WORD,         /* 2D08 sector buffer */
+        rgbSector (cbSector) BYTE AT (@rgwSector),
+        lfaSector DWORD,               /* 2F08 lfa of buffered sector */
+        paraNext WORD,                 /* 2F0C next free paragraph */
+        fDirty BYTE;                   /* 2F0E */
+
+DECLARE pNil POINTER EXTERNAL,   /* 0C92 */
+        dwNil DWORD EXTERNAL;         /* 0C96 0FFFFFFFFh (Random) */
+
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+Mul32: PROCEDURE (a, b) DWORD EXTERNAL; DECLARE (a, b) WORD; END;
+CopySb: PROCEDURE (pDst, pSrc) EXTERNAL; DECLARE (pDst, pSrc) POINTER; END;
+AppendSb: PROCEDURE (pDst, pSrc) EXTERNAL; DECLARE (pDst, pSrc) POINTER; END;
+SbFromNumber: PROCEDURE (psbRet, dw, cDigits, chFill) EXTERNAL;
+   DECLARE psbRet POINTER, dw DWORD, cDigits WORD, chFill BYTE; END;
+CreateFile: PROCEDURE (pbFileSpec, cbFileSpec, pbPw, cbPw, lfaSize) WORD
+   EXTERNAL;
+   DECLARE pbFileSpec POINTER, cbFileSpec WORD, pbPw POINTER, cbPw WORD,
+      lfaSize DWORD; END;
+OpenFile: PROCEDURE (pFhRet, pbFileSpec, cbFileSpec, pbPw, cbPw, mode) WORD
+   EXTERNAL;
+   DECLARE pFhRet POINTER, pbFileSpec POINTER, cbFileSpec WORD,
+      pbPw POINTER, cbPw WORD, mode WORD; END;
+GetFileStatus: PROCEDURE (fh, statusCode, pStatusRet, sStatusMax) WORD
+   EXTERNAL;
+   DECLARE (fh, statusCode) WORD, pStatusRet POINTER, sStatusMax WORD; END;
+ChangeFileLength: PROCEDURE (fh, lfaNew) WORD EXTERNAL;
+   DECLARE fh WORD, lfaNew DWORD; END;
+Write: PROCEDURE (fh, pBuffer, sBuffer, lfa, psDataRet) WORD EXTERNAL;
+   DECLARE fh WORD, pBuffer POINTER, sBuffer WORD, lfa DWORD,
+      psDataRet POINTER; END;
+Read: PROCEDURE (fh, pBuffer, sBuffer, lfa, psDataRet) WORD EXTERNAL;
+   DECLARE fh WORD, pBuffer POINTER, sBuffer WORD, lfa DWORD,
+      psDataRet POINTER; END;
+
+StoreMsg: PROCEDURE (psb) WORD PUBLIC REENTRANT;
+   DECLARE psb WORD, sb BASED psb (1) BYTE;
+   DECLARE para WORD;
+   IF sb(0) = 0 THEN
+      RETURN 0;
+   IF fh = 0FFFFH THEN
+      CALL OpenMsgFile;
+   para = paraNext;
+   paraNext = paraNext + SHR(sb(0) + 1 + 10H - 1, 4);
+   CALL WriteMsg(@sb, para);
+   RETURN para OR 8000H;
+END StoreMsg;
+
+GetErcMsg: PROCEDURE (psbRet, erc) PUBLIC REENTRANT;
+   DECLARE psbRet POINTER, erc WORD;
+   DECLARE sbRet BASED psbRet (1) BYTE;
+   IF erc = 0 THEN
+      sbRet(0) = 0;
+   ELSE IF (erc AND 8000H) = 0 THEN
+      CALL GetStdErcMsg(psbRet, erc);
+   ELSE
+      CALL ReadMsg(psbRet, erc AND 7FFFH);
+END GetErcMsg;
+
+GetStdErcMsg: PROCEDURE (psbRet, erc) PUBLIC REENTRANT;
+   DECLARE psbRet POINTER, erc WORD;
+   DECLARE sbRet BASED psbRet (1) BYTE;
+   DECLARE pEntry WORD, entry BASED pEntry STRUCTURE (erc WORD, sb (1) BYTE);
+   DECLARE sbNum (13) BYTE;
+   pEntry = .rgbErcTab;
+   DO WHILE entry.erc <> 0;
+      IF entry.erc = erc THEN DO;
+         CALL CopySb(psbRet, @entry.sb);
+         RETURN;
+      END;
+      pEntry = pEntry + 3 + entry.sb(0);
+   END;
+   sbRet(0) = 0;
+   CALL AppendSb(psbRet, @sbErcEq);
+   CALL SbFromNumber(@sbNum, DOUBLE(erc), 1, 0);
+   CALL AppendSb(psbRet, @sbNum);
+END GetStdErcMsg;
+
+OpenMsgFile: PROCEDURE PUBLIC REENTRANT;
+   DECLARE erc WORD;
+   erc = CreateFile(@rgbFileSpec, 15, pNil, 0, 0);
+   IF erc <> 0E0H THEN    /* 224: file already exists */
+      CALL CheckErc(erc);
+   CALL CheckErc(OpenFile(@fh, @rgbFileSpec, 15, pNil, 0, 6D6DH));
+   CALL CheckErc(GetFileStatus(fh, 0, @lfaFileEnd, 4));
+   lfaSector = dwNil;
+   fDirty = FALSE;
+   paraNext = 0;
+END OpenMsgFile;
+
+WriteMsg: PROCEDURE (pb, para) PUBLIC REENTRANT;
+   DECLARE pb POINTER, para WORD;
+   DECLARE ab BASED pb (1) BYTE;
+   DECLARE lfa DWORD, awLfa (2) WORD AT (@lfa);
+   DECLARE iOff WORD;
+   DECLARE i WORD;
+   DECLARE cb WORD;
+   DECLARE cbChunk WORD;
+   lfa = Mul32(para, 16);
+   iOff = awLfa(0) AND 1FFH;
+   awLfa(0) = awLfa(0) AND 0FE00H;
+   cb = ab(0) + 1;
+   i = 0;
+   DO WHILE i < cb;
+      CALL LoadSector(lfa);
+      cbChunk = cb - i;
+      IF cbSector - iOff < cbChunk THEN
+         cbChunk = cbSector - iOff;
+      CALL MOVB(@ab(i), @rgbSector(iOff), cbChunk);
+      fDirty = TRUE;
+      lfa = lfa + cbSector;
+      iOff = 0;
+      i = i + cbChunk;
+   END;
+END WriteMsg;
+
+ReadMsg: PROCEDURE (psbRet, para) PUBLIC REENTRANT;
+   DECLARE psbRet POINTER, para WORD;
+   DECLARE sbRet BASED psbRet (1) BYTE;
+   DECLARE lfa DWORD, awLfa (2) WORD AT (@lfa);
+   DECLARE iOff WORD;
+   DECLARE i WORD;
+   DECLARE cb WORD;
+   DECLARE cbChunk WORD;
+   lfa = Mul32(para, 16);
+   iOff = awLfa(0) AND 1FFH;
+   awLfa(0) = awLfa(0) AND 0FE00H;
+   CALL LoadSector(lfa);
+   sbRet(0) = rgbSector(iOff);
+   iOff = iOff + 1;
+   cb = sbRet(0);
+   i = 1;
+   DO WHILE i < cb;
+      CALL LoadSector(lfa);
+      cbChunk = cb - i;
+      IF cbSector - iOff < cbChunk THEN
+         cbChunk = cbSector - iOff;
+      CALL MOVB(@rgbSector(iOff), @sbRet(i), cbChunk);
+      lfa = lfa + cbSector;
+      iOff = 0;
+      i = i + cbChunk;
+   END;
+END ReadMsg;
+
+LoadSector: PROCEDURE (lfa) PUBLIC REENTRANT;
+   DECLARE lfa DWORD;
+   DECLARE cbRet WORD;
+   IF lfa = lfaSector THEN
+      RETURN;
+   IF fDirty THEN DO;
+      IF lfaFileEnd <= lfaSector THEN DO;
+         lfaFileEnd = lfaSector + 0A00H;
+         CALL CheckErc(ChangeFileLength(fh, lfaFileEnd));
+      END;
+      CALL CheckErc(Write(fh, @rgbSector, cbSector, lfaSector, @cbRet));
+      fDirty = FALSE;
+   END;
+   IF lfa < lfaFileEnd THEN
+      CALL CheckErc(Read(fh, @rgbSector, cbSector, lfa, @cbRet));
+   ELSE
+      CALL SETB(0, @rgbSector, cbSector);
+   lfaSector = lfa;
+END LoadSector;
+
+END ErrMsg;

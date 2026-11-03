@@ -1,0 +1,505 @@
+$MEDIUM OPTIMIZE(2)
+/* RatsC: game initialisation and user interface (image 1DF8-287C).
+   InitGame      allocate/clear the 64K map, video, options form, scores file
+                 name, font, object pool, maze generation, factory placement
+   AddScore      add points, award a bonus life at each threshold
+   UpdateStatus  redraw the two status lines (counters, score, high, maze #)
+   UpdateClock   time display + difficulty value
+   EndLevel      end-of-game tally (raw score, lives bonus, time penalty),
+                 high score entry, exit
+   PollKeyboard  read raw key-down/key-up codes into key bit masks
+   Helpers: InitVideo, GetOptions (form + scores file name), SelectFont,
+   InitObjects, MazeCell (GenMaze callback), OrAttr, MarkFactory, PutNum,
+   CenterMsg, ShowLine.
+   Code and CONST are byte-identical to the original.
+   CONST = DGROUP 00EE-0297: DATA declarations in declaration order, then
+   the inline string constants of GetOptions (027C, 028F).             */
+RatsC: DO;
+
+DECLARE FOREVER LITERALLY 'WHILE 1',
+        TRUE LITERALLY '0FFH', FALSE LITERALLY '0';
+
+DECLARE ObjType LITERALLY 'STRUCTURE (link WORD, delay BYTE, ctr BYTE,
+        type BYTE, size BYTE, b6 BYTE, dir BYTE, flags BYTE, b9 BYTE,
+        wA WORD, wC WORD, wE WORD)';
+
+/* ---- CONST (DGROUP 00EA..) ---- */
+DECLARE wShotReload WORD PUBLIC DATA (5),   /* 00EA: player shot reload ticks (used by B) */
+        tRespawn WORD PUBLIC DATA (2);      /* 00EC: ticks before the player respawns (used by A) */
+DECLARE rgwFactValue (5) WORD DATA (500, 2000, 5000, 10000, 15000), /* 00EE */
+        rgwBonus (7) WORD DATA (15000, 25000, 35000, 45000, 55000, 0, 0), /* 00F8 */
+        rgpEndMsg (3) WORD DATA (.sbWin, .sbLose, .sbQuit),      /* 0106 */
+        rgwKeyMask (14) WORD DATA (1, 2, 4, 8, 1, 2, 4, 8, 10H, 20H, 40H, 80H,
+                                   200H, 100H),                    /* 010C */
+        sbFont (*) BYTE DATA (21, '[sys]<games>Rats.font'),        /* 0128 */
+        sbT1Font (*) BYTE DATA (23, '[sys]<games>T1Rats.font'),    /* 013E */
+        /* minimum distance between factories, indexed by count */
+        rgbSpacing (33) BYTE DATA (0FFH, 0B5H, 80H, 69H, 5BH, 51H, 4AH, 44H,
+            40H, 3CH, 39H, 37H, 34H, 32H, 30H, 2FH, 2DH, 2CH, 2BH, 2AH, 29H,
+            28H, 27H, 26H, 25H, 24H, 24H, 23H, 22H, 22H, 21H, 21H, 20H), /* 0156 */
+        sbWin (*) BYTE DATA (56,
+            'Congratulations!  The forces of goodness have prevailed!'),
+        sbLose (*) BYTE DATA (69,
+            'Your puny efforts shall never defeat the relentless Rats of the Maze!'),
+        sbQuit (*) BYTE DATA (59,
+            'So you think you can escape!  Beware of our next encounter!'),
+        sbRaw (*) BYTE DATA (14, 'Raw score     '),               /* 0232 */
+        sbUnused (*) BYTE DATA (14, 'Unused life   '),
+        sbElapsed (*) BYTE DATA (14, 'Elapsed time  '),
+        sbFinal (*) BYTE DATA (14, 'FINAL SCORE   '),
+        rgbKeys (14) BYTE DATA (1, 0FH, 0BH, 0EH, 7CH, 41H, 7DH, 7BH, 48H, 49H,
+                                12H, 7, 0, 1BH);                   /* 026E */
+
+/* ---- externals: other Rats modules ---- */
+RandomCell: PROCEDURE WORD EXTERNAL; END;
+NewPlayer: PROCEDURE (pos, b9, flags, fNew) EXTERNAL;
+   DECLARE pos WORD, (b9, flags, fNew) BYTE; END;
+NewNest: PROCEDURE (pos, i) EXTERNAL; DECLARE (pos, i) WORD; END;
+GenMaze: PROCEDURE (w, h, b1, b2, b3, b4, density, pProc) EXTERNAL;
+   DECLARE (w, h) WORD, (b1, b2, b3, b4) BYTE, density WORD, pProc POINTER; END;
+GetHighScore: PROCEDURE (psbFile) WORD EXTERNAL; DECLARE psbFile WORD; END;
+EnterHighScore: PROCEDURE (psbFile, score, w) EXTERNAL;
+   DECLARE (psbFile, score, w) WORD; END;
+HwBeep: PROCEDURE EXTERNAL; END;
+/* ---- externals: libraries ---- */
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+GetRandomSeed: PROCEDURE DWORD EXTERNAL; END;
+SeedRandom: PROCEDURE (dw) EXTERNAL; DECLARE dw DWORD; END;
+DoForm: PROCEDURE (pVars, pForm, w, b1, b2, pVars2) BYTE EXTERNAL;
+   DECLARE (pVars, pForm, w, b1, b2, pVars2) WORD; END;
+LoadFont: PROCEDURE (psbFile) EXTERNAL; DECLARE psbFile WORD; END;
+CopySb: PROCEDURE (pDst, pSrc) EXTERNAL; DECLARE (pDst, pSrc) POINTER; END;
+AppendSb: PROCEDURE (pDst, pSrc) EXTERNAL; DECLARE (pDst, pSrc) POINTER; END;
+AppendCh: PROCEDURE (pDst, ch) EXTERNAL; DECLARE pDst POINTER, ch BYTE; END;
+SbFromNumber: PROCEDURE (psbRet, dw, cDigits, chFill) EXTERNAL;
+   DECLARE psbRet POINTER, dw DWORD, cDigits WORD, chFill BYTE; END;
+VidInit: PROCEDURE (w1, w2, b1, b2) EXTERNAL;
+   DECLARE (w1, w2) WORD, (b1, b2) BYTE; END;
+ClearRect: PROCEDURE (col, row, cCols, cRows) EXTERNAL;
+   DECLARE (col, row, cCols, cRows) WORD; END;
+VidGetCell: PROCEDURE (col, row) WORD EXTERNAL; DECLARE (col, row) WORD; END;
+VidPutCell: PROCEDURE (col, row, w) EXTERNAL; DECLARE (col, row, w) WORD; END;
+VidFillAttr: PROCEDURE (col, row, cnt, attr) EXTERNAL;
+   DECLARE (col, row, cnt) WORD, attr BYTE; END;
+VidPutChars: PROCEDURE (col, row, cnt, pb, attr) EXTERNAL;
+   DECLARE (col, row, cnt) WORD, pb POINTER, attr BYTE; END;
+/* ---- CTOS ---- */
+AllocMemorySL: PROCEDURE (cBytes, ppSegmentRet) WORD EXTERNAL;
+   DECLARE cBytes WORD, ppSegmentRet POINTER; END;
+Rq258: PROCEDURE (w1, p, w2) WORD EXTERNAL;
+   DECLARE w1 WORD, p POINTER, w2 WORD; END;
+ReadKbd: PROCEDURE (pCharRet) WORD EXTERNAL; DECLARE pCharRet POINTER; END;
+ReadKbdDirect: PROCEDURE (mode, pCharRet) WORD EXTERNAL;
+   DECLARE mode WORD, pCharRet POINTER; END;
+SetKbdUnencodedMode: PROCEDURE (fOn) WORD EXTERNAL; DECLARE fOn WORD; END;
+SetScreenVidAttr: PROCEDURE (iAttr, fOn) WORD EXTERNAL;
+   DECLARE (iAttr, fOn) WORD; END;
+Beep: PROCEDURE EXTERNAL; END;
+Delay: PROCEDURE (n) WORD EXTERNAL; DECLARE n WORD; END;
+Exit: PROCEDURE EXTERNAL; END;
+
+/* ---- externals: data ---- */
+DECLARE
+   pNil POINTER EXTERNAL,               /* 0C92 */
+   optForm BYTE EXTERNAL,                /* 0680 options form descriptor */
+   sbRatsVer (1) BYTE EXTERNAL,          /* 122A 'Rats 9.2' */
+   nFactories WORD EXTERNAL,             /* 123C options record ... */
+   wDensity WORD EXTERNAL,               /* 123E */
+   dwMazeNum DWORD EXTERNAL,             /* 1242 */
+   fPreview BYTE EXTERNAL,               /* 1249 */
+   bLeftHanded BYTE EXTERNAL,            /* 124A */
+   fForever BYTE EXTERNAL,               /* 124B */
+   sbVersion (1) BYTE EXTERNAL,          /* 124C */
+   wViewW WORD EXTERNAL,                 /* 134C */
+   wViewH WORD EXTERNAL,                 /* 134E */
+   iBonus WORD EXTERNAL,                 /* 1350 */
+   pMap POINTER EXTERNAL,                /* 1352 */
+   map BASED pMap (1) BYTE,
+   posView WORD EXTERNAL,                /* 1356 */
+   rgObj (256) ObjType EXTERNAL,         /* 135A */
+   rgPos (1024) WORD EXTERNAL,           /* 235A */
+   rgHead (16) WORD EXTERNAL,            /* 2B5A */
+   rgTail (16) WORD EXTERNAL,            /* 2B7A */
+   iWheel WORD EXTERNAL,                 /* 2B9A */
+   pFree WORD EXTERNAL,                  /* 2B9C */
+   pPlayer WORD EXTERNAL,                /* 2B9E */
+   cRatsDead WORD EXTERNAL,              /* 2BA2 */
+   cRatsLeft WORD EXTERNAL,              /* 2BA4 */
+   cCrazyDead WORD EXTERNAL,             /* 2BA6 */
+   cCrazyLeft WORD EXTERNAL,             /* 2BA8 */
+   cFactDead WORD EXTERNAL,              /* 2BAA */
+   cFactLeft WORD EXTERNAL,              /* 2BAC */
+   cDeaths WORD EXTERNAL,                /* 2BAE */
+   cLives WORD EXTERNAL,                 /* 2BB0 */
+   tickCount WORD EXTERNAL,              /* 2CAC (declared before score: operand order) */
+   score WORD EXTERNAL,                  /* 2BB2 */
+   hiScore WORD EXTERNAL,                /* 2BB4 */
+   wDifficulty WORD EXTERNAL,            /* 2BB6 */
+   wFactValue WORD EXTERNAL,             /* 2BB8 */
+   wKeysHeld WORD EXTERNAL,                  /* 2BBA */
+   wKeysHit WORD EXTERNAL,              /* 2BBC */
+   wKeysUp WORD EXTERNAL,              /* 2BBE */
+   tClock WORD EXTERNAL,                 /* 2BC0 */
+   wScrW WORD EXTERNAL, wScrH WORD EXTERNAL,  /* 2BC2, 2BC4 */
+   rgbStatus1 (80) BYTE EXTERNAL,        /* 2BC7 */
+   rgbStatus2 (80) BYTE EXTERNAL,        /* 2C17 */
+   sbScoresFile (1) BYTE EXTERNAL,       /* 2C67 */
+   pVidCfg POINTER EXTERNAL,            /* 2F1E */
+   bVidType BASED pVidCfg BYTE,
+   cScrCols WORD EXTERNAL,               /* 2F22 */
+   cScrLines WORD EXTERNAL;               /* 2F24 */
+
+InitGame: PROCEDURE PUBLIC REENTRANT;
+   DECLARE n WORD;
+   DECLARE i WORD;
+   DECLARE j WORD;
+   DECLARE rgFact (100) WORD;
+   DECLARE pos WORD;
+   DECLARE pos2 WORD;
+   DECLARE dx BYTE;
+   DECLARE dy BYTE;
+   DECLARE tries BYTE;
+   DECLARE ch BYTE;
+   DECLARE pt STRUCTURE (x BYTE, y BYTE) AT (@pos),
+           pt2 STRUCTURE (x BYTE, y BYTE) AT (@pos2);
+   CALL CheckErc(AllocMemorySL(0FFFFH, @pMap));
+   CALL SETW(0, pMap, 8000H);
+   CALL InitVideo;
+   CALL GetOptions;
+   CALL SelectFont;
+   score = 0;
+   hiScore = GetHighScore(.sbScoresFile);
+   CALL VidPutChars(0, 0, 80, @rgbStatus1, 0);
+   CALL VidPutChars(0, 1, 80, @rgbStatus2, 0);
+   CALL UpdateStatus;
+   CALL InitObjects;
+   CALL SeedRandom(dwMazeNum);
+   CALL GenMaze(10H, 20H, 2, 2, 2, 2, wDensity * 147H, @MazeCell);
+   /* place the player and the factories, well apart from each other */
+   n = nFactories + 1;
+   IF n < 33 THEN dx = rgbSpacing(n);
+   ELSE dx = 0;
+   dy = SHR(dx, 1);
+   i = 0;
+   DO WHILE i < n;
+      tries = 0;
+retry:
+      pos = RandomCell;
+      j = 0;
+      DO WHILE j < i;
+         pos2 = rgFact(j);
+         IF (pt.x - pt2.x < dx OR pt2.x - pt.x < dx) AND
+            (pt.y - pt2.y < dy OR pt2.y - pt.y < dy) THEN
+         DO;
+            tries = tries + 1;
+            IF tries < 10 THEN GOTO retry;
+            IF pos = pos2 THEN GOTO retry;
+         END;
+         j = j + 1;
+      END;
+      rgFact(i) = pos;
+      i = i + 1;
+   END;
+   CALL NewPlayer(rgFact(0), 4, bLeftHanded AND 8, TRUE);
+   IF fPreview THEN CALL MarkFactory(rgFact(0), 4);
+   i = 1;
+   DO WHILE i < n;
+      CALL NewNest(rgFact(i), i);
+      IF fPreview THEN CALL MarkFactory(rgFact(i), 5);
+      i = i + 1;
+   END;
+   IF fPreview THEN
+   DO;  /* sneak preview: wait for CANCEL (ESC) or GO, then erase it */
+      DO FOREVER;
+         CALL CheckErc(ReadKbd(@ch));
+         IF ch = 1BH OR ch = 7 THEN GOTO done;
+         CALL Beep;
+      END;
+done:
+      CALL ClearRect(18H, 2, 20H, cScrLines - 2);
+   END;
+   CALL UpdateStatus;
+   CALL CheckErc(SetKbdUnencodedMode(0FFH));
+   wKeysUp, wKeysHit, wKeysHeld = 0;
+END InitGame;
+
+InitVideo: PROCEDURE PUBLIC REENTRANT;
+   DECLARE erc WORD;
+   erc = Rq258(9, pNil, 0);
+   CALL VidInit(102H, 1, 0, TRUE);
+   posView = 0;
+   wScrW = cScrCols;
+   wScrH = cScrLines - 2;
+END InitVideo;
+
+/* options form; scores file is "[!sys]<games>Rats-<factories>-<density>.scores" */
+GetOptions: PROCEDURE PUBLIC REENTRANT;
+   DECLARE sbNum (13) BYTE;
+   dwMazeNum = GetRandomSeed;
+   CALL CopySb(@sbVersion, @sbRatsVer);
+   IF NOT DoForm(.nFactories, .optForm, 0, 0FFH, 0FFH, .nFactories) THEN
+      CALL Exit;
+   CALL CopySb(@sbScoresFile, @(18, '[!sys]<games>Rats-'));
+   CALL SbFromNumber(@sbNum, nFactories, 0, ' ');
+   CALL AppendSb(@sbScoresFile, @sbNum);
+   CALL AppendCh(@sbScoresFile, '-');
+   CALL SbFromNumber(@sbNum, wDensity, 0, ' ');
+   CALL AppendSb(@sbScoresFile, @sbNum);
+   CALL AppendSb(@sbScoresFile, @(7, '.scores'));
+END GetOptions;
+
+SelectFont: PROCEDURE PUBLIC REENTRANT;
+   IF bVidType = 4 THEN CALL LoadFont(.sbT1Font);
+   ELSE CALL LoadFont(.sbFont);
+END SelectFont;
+
+InitObjects: PROCEDURE PUBLIC REENTRANT;
+   DECLARE i WORD;
+   DECLARE p WORD;
+   DECLARE obj BASED p ObjType;
+   i = 0;
+   DO WHILE i < 16;
+      rgHead(i) = .rgHead(i);
+      rgTail(i) = .rgHead(i);
+      i = i + 1;
+   END;
+   pFree, iWheel = 0;
+   p = .rgPos;
+   DO WHILE p > .rgObj;
+      p = p - 16;
+      obj.type = 0FFH;
+      obj.size = 0;
+      obj.link = pFree;
+      pFree = .obj;
+   END;
+   pPlayer = 0;
+   wViewW = wScrW;
+   wViewH = wScrH;
+END InitObjects;
+
+/* maze generator callback: draw one wall segment of maze cell (x,y) into
+   the map (cells are 16x8); with "sneak preview" also on the screen */
+MazeCell: PROCEDURE (x, y, fHoriz) PUBLIC REENTRANT;
+   DECLARE (x, y) WORD, fHoriz BYTE;
+   DECLARE pos WORD;
+   DECLARE col WORD;
+   DECLARE row WORD;
+   DECLARE k WORD;
+   DECLARE pt STRUCTURE (x BYTE, y BYTE) AT (@pos);
+   IF fPreview THEN
+   DO;
+      col = SHL(x, 1);
+      row = y;
+      IF fHoriz THEN
+      DO;
+         CALL OrAttr(col, row, 2);
+         col = (col + 1) AND 1FH;
+         CALL OrAttr(col, row, 0AH);
+         col = (col + 1) AND 1FH;
+         CALL OrAttr(col, row, 8);
+      END;
+      ELSE
+      DO;
+         CALL OrAttr(col, row, 4);
+         row = (row + 1) AND 1FH;
+         CALL OrAttr(col, row, 1);
+      END;
+   END;
+   pt.x = SHL(x, 4);
+   pt.y = SHL(y, 3);
+   IF fHoriz THEN
+   DO;
+      map(pos) = map(pos) OR 2;
+      pt.x = pt.x + 1;
+      CALL SETB(0AH, @map(pos), 15);
+      pt.x = pt.x + 15;
+      map(pos) = map(pos) OR 8;
+   END;
+   ELSE
+   DO;
+      map(pos) = map(pos) OR 4;
+      pt.y = pt.y + 1;
+      DO k = 1 TO 7;
+         map(pos) = 5;
+         pt.y = pt.y + 1;
+      END;
+      map(pos) = map(pos) OR 1;
+   END;
+END MazeCell;
+
+OrAttr: PROCEDURE (col, row, attr) PUBLIC REENTRANT;
+   DECLARE (col, row) WORD, attr BYTE;
+   DECLARE a WORD, ab (2) BYTE AT (@a);
+   IF row + 2 < cScrLines THEN
+   DO;
+      a = VidGetCell(col + 18H, row + 2);
+      ab(0) = ab(0) OR attr;
+      CALL VidPutCell(col + 18H, row + 2, a);
+   END;
+END OrAttr;
+
+/* preview: highlight a factory position on the miniature maze */
+MarkFactory: PROCEDURE (pos, attr) PUBLIC REENTRANT;
+   DECLARE pos WORD, attr BYTE;
+   DECLARE pt STRUCTURE (x BYTE, y BYTE) AT (@pos);
+   DECLARE cx WORD;
+   DECLARE cy WORD;
+   DECLARE col WORD;
+   DECLARE row WORD;
+   cx = SHR(pt.x, 4);
+   cy = SHR(pt.y, 3);
+   col = SHL(cx, 1);
+   row = cy;
+   IF row + 2 < cScrLines THEN CALL VidFillAttr(col + 18H, row + 2, 3, attr);
+   row = (row + 1) AND 1FH;
+   IF row + 2 < cScrLines THEN CALL VidFillAttr(col + 18H, row + 2, 3, attr);
+END MarkFactory;
+
+AddScore: PROCEDURE (pts) PUBLIC REENTRANT;
+   DECLARE pts WORD;
+   score = score + pts;
+   DO WHILE iBonus < 5 AND rgwBonus(iBonus) <= score AND NOT fForever;
+      cLives = cLives + 1;
+      CALL Beep;
+      iBonus = iBonus + 1;
+   END;
+END AddScore;
+
+UpdateStatus: PROCEDURE PUBLIC REENTRANT;
+   CALL PutNum(4, 0, cRatsDead, 3);
+   CALL PutNum(4, 1, cRatsLeft, 3);
+   CALL PutNum(10H, 0, cCrazyDead, 3);
+   CALL PutNum(10H, 1, cCrazyLeft, 3);
+   CALL PutNum(1EH, 0, cFactDead, 2);
+   CALL PutNum(1EH, 1, cFactLeft, 2);
+   CALL PutNum(2BH, 0, cDeaths, 2);
+   CALL PutNum(2BH, 1, cLives, 2);
+   CALL PutNum(3CH, 0, score, 5);
+   CALL PutNum(3CH, 1, hiScore, 5);
+   CALL PutNum(4AH, 1, dwMazeNum, 5);
+   CALL UpdateClock;
+   IF cFactDead < 5 THEN wFactValue = rgwFactValue(cFactDead);
+   ELSE wFactValue = rgwFactValue(4);
+END UpdateStatus;
+
+/* show the time; difficulty = factories killed*8K + rats killed*64 + time*32 */
+UpdateClock: PROCEDURE PUBLIC REENTRANT;
+   DECLARE hi WORD;
+   tClock = tickCount;
+   CALL PutNum(4AH, 0, tickCount, 5);
+   hi, wDifficulty = 0;
+   IF cFactDead < 8 THEN
+   DO;
+      wDifficulty = wDifficulty + SHL(cFactDead, 13);
+      hi = hi PLUS 0;
+   END;
+   ELSE hi = hi + 1;
+   IF cRatsDead < 400H THEN
+   DO;
+      wDifficulty = wDifficulty + SHL(cRatsDead, 6);
+      hi = hi PLUS 0;
+   END;
+   ELSE hi = hi + 1;
+   IF tickCount < 800H THEN
+   DO;
+      wDifficulty = wDifficulty + SHL(tickCount, 5);
+      hi = hi PLUS 0;
+   END;
+   ELSE hi = hi + 1;
+   IF hi <> 0 THEN wDifficulty = 0FFFFH;
+END UpdateClock;
+
+PutNum: PROCEDURE (col, row, dw, cDigits) PUBLIC REENTRANT;
+   DECLARE (col, row) WORD, dw DWORD, cDigits WORD;
+   DECLARE sb (13) BYTE;
+   CALL SbFromNumber(@sb, dw, cDigits, ' ');
+   CALL VidPutChars(col, row, sb(0), @sb(1), 0);
+END PutNum;
+
+/* reason: 0 = all factories destroyed, 1 = out of lives, 2 = quit */
+EndLevel: PROCEDURE (reason) PUBLIC REENTRANT;
+   DECLARE reason BYTE;
+   DECLARE row WORD;
+   DECLARE t WORD;
+   CALL CheckErc(SetScreenVidAttr(0, 0));
+   CALL UpdateStatus;
+   CALL ClearRect(0, 2, cScrCols, cScrLines - 2);
+   CALL CenterMsg(2, rgpEndMsg(reason));
+   row = 10;
+   CALL CheckErc(Delay(row));
+   CALL ShowLine(30, row, .sbRaw, ' ', score, 0);
+   CALL UpdateStatus;
+   CALL HwBeep;
+   row = row + 2;
+   CALL CheckErc(SetKbdUnencodedMode(0));
+   DO WHILE cLives <> 0;
+      CALL CheckErc(Delay(10));
+      CALL ShowLine(30, row, .sbUnused, '+', 1000, 0);
+      score = score + 1000;
+      cLives = cLives - 1;
+      CALL UpdateStatus;
+      CALL HwBeep;
+      row = row + 2;
+   END;
+   CALL CheckErc(Delay(10));
+   IF tickCount <= score THEN t = tickCount;
+   ELSE t = score;
+   CALL ShowLine(30, row, .sbElapsed, '-', t, 0);
+   score = score - t;
+   CALL UpdateStatus;
+   CALL HwBeep;
+   row = row + 2;
+   CALL CheckErc(Delay(10));
+   CALL ShowLine(30, row, .sbFinal, ' ', score, 8);
+   CALL UpdateStatus;
+   CALL Beep;
+   row = row + 2;
+   CALL CheckErc(Delay(50));
+   IF NOT fForever THEN CALL EnterHighScore(.sbScoresFile, score, 3);
+   CALL ClearRect(0, 0, cScrCols, cScrLines);
+   CALL Exit;
+END EndLevel;
+
+CenterMsg: PROCEDURE (row, psb) PUBLIC REENTRANT;
+   DECLARE (row, psb) WORD;
+   DECLARE sb BASED psb (1) BYTE;
+   CALL VidPutChars(SHR(cScrCols - sb(0), 1), row, sb(0), @sb(1), 0);
+END CenterMsg;
+
+/* "<label><sign><number>" line of the end-of-game tally */
+ShowLine: PROCEDURE (col, row, psb, chSign, val, attr) PUBLIC REENTRANT;
+   DECLARE (col, row, psb) WORD, chSign BYTE, val WORD, attr BYTE;
+   DECLARE sb BASED psb (1) BYTE;
+   DECLARE sbNum (13) BYTE;
+   CALL SbFromNumber(@sbNum, val, 5, ' ');
+   CALL VidPutChars(col, row, sb(0), @sb(1), attr);
+   CALL VidPutCell(sb(0) + col, row, SHL(DOUBLE(attr), 8) + chSign);
+   CALL VidPutChars(sb(0) + col + 1, row, sbNum(0), @sbNum(1), attr);
+END ShowLine;
+
+/* key codes: bit 7 set = key released */
+PollKeyboard: PROCEDURE PUBLIC REENTRANT;
+   DECLARE i WORD;
+   DECLARE mask WORD;
+   DECLARE ch BYTE;
+   DO FOREVER;
+      IF ReadKbdDirect(1, @ch) <> 0 THEN RETURN;
+      IF (ch AND 7FH) = 4 AND (ch AND 80H) = 0 THEN CALL EndLevel(2);
+      ELSE
+      DO;
+         i = FINDB(@rgbKeys, ch AND 7FH, 14);
+         IF i <> 0FFFFH THEN
+         DO;
+            mask = rgwKeyMask(i);
+            IF (ch AND 80H) = 0 THEN
+            DO;
+               wKeysHit = wKeysHit OR mask;
+               wKeysUp = wKeysUp AND NOT mask;
+            END;
+            ELSE wKeysUp = wKeysUp OR mask;
+         END;
+      END;
+   END;
+END PollKeyboard;
+
+END RatsC;

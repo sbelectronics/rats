@@ -1,0 +1,132 @@
+$MEDIUM OPTIMIZE(2)
+Mod3396: DO;
+DECLARE FOREVER LITERALLY 'WHILE 1';
+/* Small heap on top of CTOS short-lived memory.
+   Free blocks are paragraph aligned (offset 0) and kept in a singly linked
+   list sorted by DESCENDING segment address, head in pFreeHead, ended by
+   the CTOS nil pointer C000:FFFF.  Block header (at offset 0 of its
+   segment): +0 size in paragraphs WORD, +2 next POINTER; the user pointer
+   is block+2.
+   MemAlloc(ppRet, cb): first fit; splits the top part off a larger block,
+     otherwise asks CTOS (AllocMemorySL), after returning the lowest free
+     block to CTOS (MemTrim).  Returns erc (400 if cb is too large).
+   MemFree(p): inserts the block, coalescing with neighbours, then MemTrim.
+   MemTrim: returns the last (lowest) free block to CTOS. */
+
+IsNil: PROCEDURE (p) BYTE EXTERNAL; DECLARE p POINTER; END;
+NotNil: PROCEDURE (p) BYTE EXTERNAL; DECLARE p POINTER; END;
+AllocMemorySL: PROCEDURE (cBytes, ppSegmentRet) WORD EXTERNAL;
+   DECLARE cBytes WORD, ppSegmentRet POINTER; END;
+DeallocMemorySL: PROCEDURE (pSegment, cBytes) WORD EXTERNAL;
+   DECLARE pSegment POINTER, cBytes WORD; END;
+
+DECLARE BlkType LITERALLY 'STRUCTURE (cParas WORD, pNext POINTER)';
+DECLARE PtrWords LITERALLY 'STRUCTURE (off WORD, seg WORD)';
+
+DECLARE pNil POINTER EXTERNAL;   /* nil C000:FFFF, CONST 0C92, owned by Mod55FC.asm */
+DECLARE freeHeadWords (2) WORD INITIAL (0FFFFH, 0C000H), /* DATA 2CB0 */
+   pFreeHead POINTER AT (@freeHeadWords);
+
+MemAlloc: PROCEDURE (ppRet, cb) WORD PUBLIC REENTRANT;
+   DECLARE ppRet POINTER, cb WORD;
+   DECLARE pRet BASED ppRet POINTER;
+   DECLARE cParas WORD;
+   DECLARE ppLink POINTER;
+   DECLARE pLink BASED ppLink POINTER;
+   DECLARE p POINTER;
+   DECLARE pw PtrWords AT (@p);
+   DECLARE blk BASED p BlkType;
+   DECLARE erc WORD;
+   IF cb <= 0FFEEH THEN
+   DO;
+      cb = cb + 2;
+      cParas = SHR(cb + 15, 4);
+   END;
+   ELSE IF cb <= 0FFFEH THEN
+   DO;
+      cb = 0FFFFH;
+      cParas = 1000H;
+   END;
+   ELSE RETURN 400;
+   ppLink = @pFreeHead;
+   DO WHILE NotNil(pLink);
+      p = pLink;
+      IF blk.cParas > cParas THEN
+      DO;   /* split: allocate the top part */
+         blk.cParas = blk.cParas - cParas;
+         pw.seg = pw.seg + blk.cParas;
+         GOTO setSize;
+      END;
+      ELSE IF blk.cParas = cParas THEN
+      DO;
+         pLink = blk.pNext;
+         GOTO found;
+      END;
+      ppLink = @blk.pNext;
+   END;
+   IF NotNil(pFreeHead) THEN CALL MemTrim;
+   erc = AllocMemorySL(cb, @p);
+   IF erc <> 0 THEN RETURN erc;
+setSize:
+   blk.cParas = cParas;
+found:
+   pRet = @blk.pNext;
+   RETURN 0;
+END MemAlloc;
+
+MemFree: PROCEDURE (pMem) PUBLIC REENTRANT;
+   DECLARE pMem POINTER;
+   DECLARE pMemW PtrWords AT (@pMem);
+   DECLARE mem BASED pMem BlkType;
+   DECLARE ppLink POINTER;
+   DECLARE pLink BASED ppLink POINTER;
+   DECLARE p POINTER;
+   DECLARE pw PtrWords AT (@p);
+   DECLARE blk BASED p BlkType;
+   pMemW.off = pMemW.off - 2;
+   ppLink = @pFreeHead;
+again:
+   DO WHILE NotNil(pLink);
+      p = pLink;
+      IF pMemW.seg < pw.seg THEN
+      DO;
+         IF pMemW.seg + mem.cParas = pw.seg THEN
+         DO;   /* block just below p: absorb p */
+            mem.cParas = mem.cParas + blk.cParas;
+            pLink = blk.pNext;
+            p = pLink;
+            GOTO again;
+         END;
+      END;
+      ELSE IF pw.seg + blk.cParas = pMemW.seg THEN
+      DO;   /* block just above p: grow p */
+         blk.cParas = blk.cParas + mem.cParas;
+         GOTO done;
+      END;
+      ELSE GOTO insert;
+      ppLink = @blk.pNext;
+   END;
+insert:
+   mem.pNext = pLink;
+   pLink = pMem;
+done:
+   CALL MemTrim;
+END MemFree;
+
+MemTrim: PROCEDURE PUBLIC REENTRANT;
+   DECLARE ppLink POINTER;
+   DECLARE pLink BASED ppLink POINTER;
+   DECLARE p POINTER;
+   DECLARE blk BASED p BlkType;
+   ppLink = @pFreeHead;
+   DO FOREVER;
+      p = pLink;
+      IF IsNil(blk.pNext) THEN GOTO last;
+      ppLink = @blk.pNext;
+   END;
+last:
+   IF DeallocMemorySL(p, SHL(blk.cParas, 4) - 1) = 0 THEN
+      pLink = pNil;
+END MemTrim;
+
+END Mod3396;

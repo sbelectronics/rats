@@ -1,0 +1,278 @@
+$MEDIUM OPTIMIZE(1)
+Scores: DO;
+/* High-score table.
+   Score file (name given by the caller as a length-prefixed string, e.g.
+   the scores file name at DGROUP 2C67h) is one 512-byte page:
+      +0   cnt WORD               number of entries (0..10)
+      +2   recs(10) ScoreRec      26 bytes each, sorted by descending score
+   ScoreRec: +0 score WORD, +2 date (CTOS date/time DWORD),
+             +6 name(20) BYTE (user name from the ASCB, blank padded).
+   GetHighScore returns the best score; EnterHighScore inserts a new score
+   (if it makes the top 10), shows the table as a form (score / date /
+   name fields; the name is editable) and writes the file back. */
+
+DECLARE FOREVER LITERALLY 'WHILE 1';
+DECLARE RecType LITERALLY 'STRUCTURE (score WORD, date DWORD, name (20) BYTE)';
+DECLARE BufType LITERALLY 'STRUCTURE (cnt WORD, recs (510) BYTE)';
+DECLARE FieldType LITERALLY 'STRUCTURE (b (16) BYTE)';
+
+/* ---- externals: other modules ---- */
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+VidPutChars: PROCEDURE (col, row, cnt, pb, attr) EXTERNAL;
+   DECLARE (col, row, cnt) WORD, pb POINTER, attr BYTE; END;
+VidFillCells: PROCEDURE (col, row, cnt, attrs) EXTERNAL;
+   DECLARE (col, row, cnt, attrs) WORD; END;
+ClearRect: PROCEDURE (col, row, cols, rows) EXTERNAL;
+   DECLARE (col, row, cols, rows) WORD; END;
+GetNow: PROCEDURE DWORD EXTERNAL; END;
+FmtDateTime: PROCEDURE (pSbOut, dt, pFmt) WORD EXTERNAL;
+   DECLARE pSbOut POINTER, dt DWORD, pFmt POINTER; END;
+FormOpenShow: PROCEDURE (pState, pForm, w, col, row, pRec) EXTERNAL;
+   DECLARE (pState, pForm, w, col, row, pRec) WORD; END;
+FormEdit: PROCEDURE (pRec, pState) BYTE EXTERNAL;
+   DECLARE (pRec, pState) WORD; END;
+FormClose: PROCEDURE (pState) EXTERNAL; DECLARE pState WORD; END;
+FmtNumber: PROCEDURE (pOut, pIn) WORD EXTERNAL; DECLARE (pOut, pIn) WORD; END;
+ParseNumber: PROCEDURE (pOut, pIn) WORD EXTERNAL; DECLARE (pOut, pIn) WORD; END;
+/* ---- CTOS ---- */
+OpenFile: PROCEDURE (pFhRet, pbFileSpec, cbFileSpec, pbPassword, cbPassword,
+      mode) WORD EXTERNAL;
+   DECLARE pFhRet POINTER, pbFileSpec POINTER, cbFileSpec WORD,
+      pbPassword POINTER, cbPassword WORD, mode WORD; END;
+CreateFile: PROCEDURE (pbFileSpec, cbFileSpec, pbPassword, cbPassword,
+      lfaFileSize) WORD EXTERNAL;
+   DECLARE pbFileSpec POINTER, cbFileSpec WORD, pbPassword POINTER,
+      cbPassword WORD, lfaFileSize DWORD; END;
+Read: PROCEDURE (fh, pBufferRet, sBufferMax, lfa, psDataRet) WORD EXTERNAL;
+   DECLARE fh WORD, pBufferRet POINTER, sBufferMax WORD, lfa DWORD,
+      psDataRet POINTER; END;
+Write: PROCEDURE (fh, pBuffer, sBuffer, lfa, psDataRet) WORD EXTERNAL;
+   DECLARE fh WORD, pBuffer POINTER, sBuffer WORD, lfa DWORD,
+      psDataRet POINTER; END;
+ChangeFileLength: PROCEDURE (fh, lfaNewFileSize) WORD EXTERNAL;
+   DECLARE fh WORD, lfaNewFileSize DWORD; END;
+CloseFile: PROCEDURE (fh) WORD EXTERNAL; DECLARE fh WORD; END;
+ReadKbd: PROCEDURE (pCharRet) WORD EXTERNAL; DECLARE pCharRet POINTER; END;
+Beep: PROCEDURE EXTERNAL; END;
+GetpAscb: PROCEDURE (ppAscbRet) WORD EXTERNAL; DECLARE ppAscbRet POINTER; END;
+
+DECLARE cScrLines WORD EXTERNAL;          /* 2F24 */
+
+/* ---- CONST (DGROUP 09EE) ---- */
+DECLARE sbDateFmt (*) BYTE DATA (29, '!oo!/!0d!/!0y! !hh!:!0m! !aa!'),
+   sbAce (*) BYTE DATA (14, 'You''re an ace!'),
+   sbEnterName (*) BYTE DATA (37, 'Enter your name and press GO to exit.'),
+   sbBetterLuck (*) BYTE DATA (22, 'Better luck next time.'),
+   sbPressGo (*) BYTE DATA (17, 'Press GO to exit.'),
+   sTitle (*) BYTE DATA ('              HIGH  SCORES              ');
+/* form descriptor for the score table (DGROUP 0A92): header, then one
+   field per column: format proc, parse proc, offset in ScoreRec,
+   column, width, ...   score: number procs (forms library),
+   date: FmtDate/ParseDate (read-only), name: FmtName/ParseName. */
+DECLARE scoreForm STRUCTURE (hdr (38) BYTE,
+      pFmt1 POINTER, pParse1 POINTER, f1 (10) BYTE,
+      pFmt2 POINTER, pParse2 POINTER, f2 (10) BYTE,
+      pFmt3 POINTER, pParse3 POINTER, f3 (9) BYTE) DATA (
+   34H, 1, 0, 0, 0, 0, 0, 0, 1AH, 0, 3CH, 0, 0, 5, '     ', 0FFH,
+   5, 0, 2, '  ', 0FFH, 11H, 0, 2, '  ', 0FFH, 14H, 0, 1, ' ', 0, 0,
+   @FmtNumber, @ParseNumber, 0, 0, 5, 0, 5, 0, 0, 0, 1, 0,
+   @FmtDate, @ParseDate, 2, 0, 0CH, 0, 11H, 0, 0, 0, 0, 0,
+   @FmtName, @ParseName, 6, 0, 1FH, 0, 14H, 0FFH, 0FFH, 0, 0);
+DECLARE sbAnon (*) BYTE DATA (6, '(anon)');   /* 0AED: not referenced by code; placed here
+   because it sits between scoreForm and the next module data (0AF4) */
+
+GetHighScore: PROCEDURE (pFile) WORD PUBLIC REENTRANT;
+   DECLARE pFile WORD;
+   DECLARE file BASED pFile (1) BYTE;
+   DECLARE buf BufType;
+   DECLARE pRecs WORD;
+   DECLARE recs BASED pRecs (10) RecType;
+   CALL ReadScores(.buf, .file);
+   pRecs = .buf.recs;
+   IF buf.cnt = 0 THEN RETURN 0;
+   ELSE RETURN recs(0).score;
+END GetHighScore;
+
+EnterHighScore: PROCEDURE (pFile, score, row) PUBLIC REENTRANT;
+   DECLARE pFile WORD, score WORD, row WORD;
+   DECLARE file BASED pFile (1) BYTE;
+   DECLARE buf BufType;
+   DECLARE pRecs WORD;
+   DECLARE recs BASED pRecs (10) RecType;
+   DECLARE fields (10) FieldType;
+   DECLARE pRec WORD;
+   DECLARE rec BASED pRec RecType;
+   DECLARE pAscb POINTER;
+   DECLARE ascb BASED pAscb (1) BYTE;
+   DECLARE i BYTE;
+   DECLARE cbName BYTE;
+   DECLARE ch BYTE;
+   IF row = 8000H THEN row = SHR(cScrLines - 26, 1);
+   CALL ReadScores(.buf, .file);
+   pRecs = .buf.recs;
+   i = 0;
+   DO WHILE i < buf.cnt AND recs(i).score >= score;
+      i = i + 1;
+   END;
+   IF i < 10 THEN
+   DO;
+      pRec = .recs(i);
+      IF buf.cnt < 10 THEN buf.cnt = buf.cnt + 1;
+      CALL MOVRB(@rec, @recs(i + 1), (buf.cnt - 1 - i) * 26);
+      rec.score = score;
+      rec.date = GetNow;
+      CALL CheckErc(GetpAscb(@pAscb));
+      cbName = ascb(40H);
+      IF cbName > LENGTH(rec.name) THEN cbName = LENGTH(rec.name);
+      CALL MOVB(@ascb(41H), @rec.name, cbName);
+      CALL SETB(' ', @rec.name(cbName), LENGTH(rec.name) - cbName);
+   END;
+   CALL ShowScores(.fields, .buf, row);
+   IF i < 10 THEN
+   DO;
+      CALL ShowMsg(0, .sbAce, row);
+      CALL ShowMsg(1, .sbEnterName, row);
+      IF FormEdit(.recs(i), .fields(i)) THEN
+         CALL WriteScores(.buf, pFile);
+   END;
+   ELSE
+   DO;
+      CALL ShowMsg(0, .sbBetterLuck, row);
+      CALL ShowMsg(1, .sbPressGo, row);
+      DO FOREVER;
+         CALL CheckErc(ReadKbd(@ch));
+         IF ch = 1BH OR ch = 7 OR ch = 4 THEN GOTO done;
+         CALL Beep;
+      END;
+   END;
+done:
+   CALL ClearScores(.fields, .buf, row);
+END EnterHighScore;
+
+ShowScores: PROCEDURE (pFields, pBuf, row) PUBLIC REENTRANT;
+   DECLARE pFields WORD, pBuf WORD, row WORD;
+   DECLARE fields BASED pFields (10) FieldType;
+   DECLARE buf BASED pBuf BufType;
+   DECLARE pRecs WORD;
+   DECLARE recs BASED pRecs (10) RecType;
+   DECLARE i WORD;
+   pRecs = .buf.recs;
+   CALL ClearRect(20, row, 40, 26);
+   CALL VidPutChars(20, row, 40, @sTitle, 5);
+   i = 0;
+   DO WHILE i < buf.cnt;
+      CALL FormOpenShow(.fields(i), .scoreForm, 0, 20, row + 2 + i * 2, .recs(i));
+      i = i + 1;
+   END;
+   CALL VidFillCells(20, row + 2 + 20 + 3, 40, SHL(DOUBLE(5), 8));
+END ShowScores;
+
+ShowMsg: PROCEDURE (line, pSb, row) PUBLIC REENTRANT;
+   DECLARE line WORD, pSb WORD, row WORD;
+   DECLARE sb BASED pSb (1) BYTE;
+   DECLARE cb WORD;
+   DECLARE col WORD;
+   cb = sb(0);
+   IF cb > 40 THEN cb = 40;
+   col = SHR(40 - cb, 1);
+   CALL VidPutChars(col + 20, row + 2 + 20 + line, cb, @sb(1), 0);
+END ShowMsg;
+
+ClearScores: PROCEDURE (pFields, pBuf, row) PUBLIC REENTRANT;
+   DECLARE pFields WORD, pBuf WORD, row WORD;
+   DECLARE fields BASED pFields (10) FieldType;
+   DECLARE buf BASED pBuf BufType;
+   DECLARE pRecs WORD;
+   DECLARE i WORD;
+   pRecs = .buf.recs;
+   CALL VidFillCells(20, row, 40, 0);
+   i = 0;
+   DO WHILE i < buf.cnt;
+      CALL FormClose(.fields(i));
+      i = i + 1;
+   END;
+   CALL VidFillCells(20, row + 2 + 20, 40, 0);
+   CALL VidFillCells(20, row + 2 + 20 + 1, 40, 0);
+   CALL VidFillCells(20, row + 2 + 20 + 3, 40, 0);
+END ClearScores;
+
+/* form field procedures (referenced from scoreForm) */
+FmtDate: PROCEDURE (pSbOut, pDate) WORD PUBLIC REENTRANT;
+   DECLARE pSbOut WORD, pDate WORD;
+   DECLARE sbOut BASED pSbOut (1) BYTE;
+   DECLARE date BASED pDate DWORD;
+   RETURN FmtDateTime(@sbOut, date, @sbDateFmt);
+END FmtDate;
+
+ParseDate: PROCEDURE (pDate, pSb) WORD PUBLIC REENTRANT;
+   DECLARE pDate WORD, pSb WORD;
+   RETURN 0;
+END ParseDate;
+
+FmtName: PROCEDURE (pSbOut, pName) PUBLIC REENTRANT;
+   DECLARE pSbOut WORD, pName WORD;
+   DECLARE sbOut BASED pSbOut (1) BYTE;
+   DECLARE name BASED pName (20) BYTE;
+   sbOut(0) = SKIPRB(@name, ' ', 20) + 1;
+   CALL MOVB(@name, @sbOut(1), sbOut(0));
+END FmtName;
+
+ParseName: PROCEDURE (pName, pSb) WORD PUBLIC REENTRANT;
+   DECLARE pName WORD, pSb WORD;
+   DECLARE name BASED pName (20) BYTE;
+   DECLARE sb BASED pSb (1) BYTE;
+   CALL MOVB(@sb(1), @name, sb(0));
+   CALL SETB(' ', @name(sb(0)), LENGTH(name) - sb(0));
+   RETURN 0;
+END ParseName;
+
+ReadScores: PROCEDURE (pBuf, pName) PUBLIC REENTRANT;
+   DECLARE pBuf WORD, pName WORD;
+   DECLARE buf BASED pBuf BufType;
+   DECLARE name BASED pName (1) BYTE;
+   DECLARE fh WORD;
+   DECLARE cbRead WORD;
+   DECLARE erc WORD;
+retry:
+   erc = OpenFile(@fh, @name(1), name(0), 0, 0, 'mr');
+   IF erc = 0D7H THEN DO; buf.cnt = 0; RETURN; END;
+   ELSE IF erc = 0CBH THEN DO; buf.cnt = 0; RETURN; END;
+   ELSE IF erc = 0DCH THEN GOTO retry;
+   ELSE CALL CheckErc(erc);
+   erc = Read(fh, @buf, 512, 0, @cbRead);
+   IF erc = 2 THEN buf.cnt = 0;
+   ELSE CALL CheckErc(erc);
+   CALL CheckErc(CloseFile(fh));
+END ReadScores;
+
+WriteScores: PROCEDURE (pBuf, pName) PUBLIC REENTRANT;
+   DECLARE pBuf WORD, pName WORD;
+   DECLARE buf BASED pBuf BufType;
+   DECLARE name BASED pName (1) BYTE;
+   DECLARE fh WORD;
+   DECLARE cbWritten WORD;
+   DECLARE erc WORD;
+   DECLARE lfaSize DWORD;
+   lfaSize = 512;
+retry:
+   erc = OpenFile(@fh, @name(1), name(0), 0, 0, 'mm');
+   IF erc = 0D7H THEN RETURN;
+   ELSE IF erc = 0CBH THEN
+   DO;
+      CALL CheckErc(CreateFile(@name(1), name(0), 0, 0, lfaSize));
+      GOTO retry;
+   END;
+   ELSE IF erc = 0DCH THEN GOTO retry;
+   ELSE CALL CheckErc(erc);
+again:
+   erc = Write(fh, @buf, 512, 0, @cbWritten);
+   IF erc = 2 THEN
+   DO;
+      CALL CheckErc(ChangeFileLength(fh, lfaSize));
+      GOTO again;
+   END;
+   ELSE CALL CheckErc(erc);
+   CALL CheckErc(CloseFile(fh));
+END WriteScores;
+
+END Scores;

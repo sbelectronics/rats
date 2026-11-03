@@ -1,0 +1,23 @@
+$MEDIUM OPTIMIZE(2)
+KbdLed: DO;
+/* Keyboard LED helpers (image 0x54E4, frame 054Eh).
+   FLedOn(iLed) reads the keyboard LED bitmap with KbdReadLEDs and returns
+   TRUE (0FFh) if bit iLed is set (used by the forms runtime, e.g. to test
+   the lock LED).  SetLed(iLed, fOn) switches one LED with KbdSetLED. */
+
+CheckErc: PROCEDURE (erc) EXTERNAL; DECLARE erc WORD; END;
+KbdReadLEDs: PROCEDURE (pbLEDsRet) WORD EXTERNAL; DECLARE pbLEDsRet POINTER; END;
+KbdSetLED: PROCEDURE (iLED, fOn) WORD EXTERNAL; DECLARE (iLED, fOn) WORD; END;
+
+FLedOn: PROCEDURE (iLed) BYTE PUBLIC REENTRANT;
+   DECLARE iLed BYTE;
+   DECLARE bLeds BYTE;
+   CALL CheckErc(KbdReadLEDs(@bLeds));
+   RETURN (SHR(bLeds, iLed) AND 1) <> 0;
+END FLedOn;
+
+SetLed: PROCEDURE (iLed, fOn) PUBLIC REENTRANT;
+   DECLARE (iLed, fOn) BYTE;
+   CALL CheckErc(KbdSetLED(iLed, fOn));
+END SetLed;
+END KbdLed;
