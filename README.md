@@ -1,7 +1,5 @@
 # Reversing Rats
 
-![Rats gameplay in the Windows port: the player in the maze, a rat factory, and rats closing in](docs/gameplay.png)
-
 This repository contains reverse-engineered source code for the classic Convergent
 Technologies game "Rats", which ran on Convergent workstations such as the AWS, IWS
 and NGEN in the 1980s.
@@ -14,6 +12,8 @@ reproduces the original binary byte for byte.
 
 This repo also contains a port of Rats to the Go programming language. It runs on
 Windows, so that people with Windows computers can play Rats!
+
+![Rats gameplay in the Windows port: the player in the maze, a rat factory, and rats closing in](docs/gameplay.png)
 
 It should be possible to port the source code to other languages too.
 
